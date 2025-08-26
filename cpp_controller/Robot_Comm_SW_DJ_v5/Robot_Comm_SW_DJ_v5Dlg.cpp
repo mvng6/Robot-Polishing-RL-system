@@ -385,8 +385,6 @@ bool CRobotCommSWDJv5Dlg::StartContactThread_Flat_RL()
 	m_flags.robotRunning.store(true);							// 로봇 구동 루프 ON
 	m_pThread_FC = AfxBeginThread(Thread_Contact_Flat_RL, this);	// 로봇 구동 쓰레드 시작
 
-	printf("Thread Start 2\n");
-
 	if (!m_pThread_FC)											// 쓰레드 생성 실패 처리
 	{
 		m_flags.robotRunning.store(false);
@@ -1428,12 +1426,16 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 	const float RL_max_integral_limit = 100.0f;					// 최대 적분 한계값
 	const float RL_min_integral_limit = -100.0f;				// 최소 적분 한계값
 
+	int RL_count = 0;
+
 	// ===============================================
 	// 데이터 기록 시작
 	g_pDlg->m_flags.logThreadRunning.store(true);
 	g_pDlg->m_pThread_Logger = AfxBeginThread(Thread_Logger, g_pDlg);
 
 	t_start = system_clock::now();
+
+	printf("에피소드 학습을 위한 로봇 동작 시작!\n");
 
 	while (g_pDlg->m_flags.robotRunning.load())
 	{
@@ -1458,14 +1460,21 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 
 			g_pDlg->m_setting.Target_Force_N.store(-1.0f * random_force);
 
+			RL_count = 0;
 			g_pDlg->m_tcpip.episode_state_flag.store(false);
-			printf("에피소드 종료로 인한 목표 접촉력 변경\n");
+			printf("에피소드 종료로 인한 목표 접촉력 변경 및 메세지 수신 카운트 초기화\n");
 		}
 
 		g_pDlg->m_tcpip.is_new_message_received = g_pDlg->m_received_RL_Confirm_Flag.load();
+
 		if (g_pDlg->m_tcpip.is_new_message_received.load() == true)
 		{
 			g_pDlg->m_tcpip.rl_pressure_from_server = g_pDlg->m_received_RL_Pressure.load();
+			RL_count += 1;
+
+			printf("RL PC로부터 %d번째 메세지 수신 성공! (RL_P: %f, message_flag: %d, episode_flag: %d) \n",
+				RL_count, g_pDlg->m_received_RL_Pressure.load(), static_cast<int>(g_pDlg->m_received_RL_Confirm_Flag.load()), static_cast<int>(g_pDlg->m_received_RL_Episode_Flag.load()));
+
 			g_pDlg->m_received_RL_Confirm_Flag.store(false);
 		}
 
@@ -1599,6 +1608,8 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 			{
 				if (g_pDlg->m_setting.First_Contact.load() == true)
 				{
+					printf("Control Step = 2\n");
+
 					// 서버로 보내기 위한 플래그 설정
 					g_pDlg->m_flags.RL_sanderactive_flag.store(true);
 
