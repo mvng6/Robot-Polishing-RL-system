@@ -361,25 +361,14 @@ bool CRobotCommSWDJv5Dlg::StartContactThread_Flat_RL()
 	{
 		Status_gui_str = _T("공압 시스템 연결이 되지 않았으므로 공압 시스템을 연결합니다...");
 		var_status_gui.SetWindowTextW(Status_gui_str);
-		//OnBnClickedButAirOn();
 		return false;
 	}
 	if (!m_flags.ftRunning.load())								// FT 센서가 연결되지 않은 경우 경고 알림 처리
 	{
 		Status_gui_str = _T("FT 센서 연결이 되지 않았으므로 FT 센서를 연결합니다...");
 		var_status_gui.SetWindowTextW(Status_gui_str);
-		//OnBnClickedButFtSensorOn();
 		return false;
 	}
-
-	//if (!m_flags.tcpip_flag.load())
-	//{
-	//	Status_gui_str = _T("서버와의 통신이 연결되지 않았으므로 서버와 통신을 연결합니다...");
-	//	var_status_gui.SetWindowTextW(Status_gui_str);
-	//	OnBnClickedButTcpip();
-	//	//return false;
-	//}
-	//OnBnClickedButTcpip();
 
 	// 2) 로봇 구동 쓰레드 시작
 	m_flags.robotRunning.store(true);							// 로봇 구동 루프 ON
@@ -1473,9 +1462,9 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 			RL_count += 1;
 
 			printf("RL PC로부터 %d번째 메세지 수신 성공! (RL_P: %f, message_flag: %d, episode_flag: %d) \n",
-				RL_count, g_pDlg->m_received_RL_Pressure.load(), static_cast<int>(g_pDlg->m_received_RL_Confirm_Flag.load()), static_cast<int>(g_pDlg->m_received_RL_Episode_Flag.load()));
+				RL_count, g_pDlg->m_tcpip.rl_pressure_from_server.load(), static_cast<int>(g_pDlg->m_tcpip.is_new_message_received.load()), static_cast<int>(g_pDlg->m_tcpip.episode_state_flag.load()));
 
-			g_pDlg->m_received_RL_Confirm_Flag.store(false);
+			g_pDlg->m_tcpip.is_new_message_received.store(false);
 		}
 
 		// =========================================================================
