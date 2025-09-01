@@ -550,7 +550,7 @@ UINT CRobotCommSWDJv5Dlg::Thread_Servo(LPVOID pParam)
 	// QueryPerformanceFrequency => 1초당 tick 수
 	LARGE_INTEGER qpf;
 	QueryPerformanceFrequency(&qpf);
-	const LONGLONG one_ms_tick = qpf.QuadPart / 1000LL;
+	const LONGLONG one_ms_tick = qpf.QuadPart / 100LL;
 
 	// QueryPerformanceCounter => 시작 시각
 	LARGE_INTEGER startTick;
@@ -627,7 +627,7 @@ UINT CRobotCommSWDJv5Dlg::Thread_Servo(LPVOID pParam)
 			|| (Th_robotData_servo.jointAng[2] < 10.0) || (Th_robotData_servo.jointAng[2] > 110.0)
 			|| (Th_robotData_servo.jointAng[3] < -30.0) || (Th_robotData_servo.jointAng[3] > 30.0)
 			|| (Th_robotData_servo.jointAng[4] < 60.0) || (Th_robotData_servo.jointAng[4] > 130.0)
-			|| (Th_robotData_servo.jointAng[5] < 30.0) || (Th_robotData_servo.jointAng[5] > 135.0))
+			|| (Th_robotData_servo.jointAng[5] < -135.0) || (Th_robotData_servo.jointAng[5] > -35.0))
 		{
 			if (stopRobotWithError(_T("관절 각도 범위 초과로 인한 정지")))
 				break;
@@ -1354,7 +1354,7 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 	// QueryPerformanceFrequency → 1초당 tick 수
 	LARGE_INTEGER qpf;
 	QueryPerformanceFrequency(&qpf);
-	const LONGLONG one_ms_tick = qpf.QuadPart / 1000LL;
+	const LONGLONG one_ms_tick = qpf.QuadPart / 100LL;
 
 	// QueryPerformanceCounter → 시작 시각
 	LARGE_INTEGER startTick;
@@ -1373,7 +1373,7 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 	g_pDlg->m_setting.Target_Force_N.store(-30.0f);				// 목표 접촉력 설정 (N)   [음수로 설정해줘야 로봇 베이스 좌표계와 동일한 방향]
 	g_pDlg->m_setting.Force_limit_N.store(50.0f);				// 접촉력 제한값 설정 (N)
 	g_pDlg->m_setting.Target_vz.store(5.0f);					// 목표 접촉 속도 설정 (mm/s) [양수로 설정해줘야 로봇 베이스 좌표계와 동일한 방향]
-	int Saturation_time = 5000;								// 접촉 유지 시간 설정 (ms)
+	int Saturation_time = 5000;									// 접촉 유지 시간 설정 (ms)
 	g_pDlg->m_setting.First_Contact.store(true);
 
 	// ==============================================
@@ -1410,7 +1410,9 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 	float RL_previous_error_force_z = 0.0f;						// 이전 접촉력 오차값 초기화
 	float RL_integral_error_force_z = 0.0f;						// 접촉력 오차 적분값 초기화
 	const float RL_dt = 0.001f;									// 제어 주기 (초 단위)
-	
+	bool RL_confirm = false;									// RL PC로부터 메세지 수신 확인 플래그 초기화
+	bool episode_ended = false;									// 에피소드 종료 플래그 초기화
+
 	// 적분 와인드업 방지를 위한 한계값
 	const float RL_max_integral_limit = 100.0f;					// 최대 적분 한계값
 	const float RL_min_integral_limit = -100.0f;				// 최소 적분 한계값
@@ -1439,32 +1441,34 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 		// =========================================================================
 		// Episode가 종료된 경우 , RL Episode Flag가 true로 설정됨
 		//	 => 목표 접촉력 변경
-		g_pDlg->m_tcpip.episode_state_flag = g_pDlg->m_received_RL_Episode_Flag.load();
-		if (g_pDlg->m_tcpip.episode_state_flag.load() == true)
+
+		if (g_pDlg->m_received_RL_Confirm_Flag.load() == true)
 		{
-			std::random_device rd;
-			std::mt19937 gen(rd());
-			std::uniform_int_distribution<> dist(35, 50);
-			int random_force = dist(gen);
-
-			g_pDlg->m_setting.Target_Force_N.store(-1.0f * random_force);
-
-			RL_count = 0;
-			g_pDlg->m_tcpip.episode_state_flag.store(false);
-			printf("에피소드 종료로 인한 목표 접촉력 변경 및 메세지 수신 카운트 초기화\n");
-		}
-
-		g_pDlg->m_tcpip.is_new_message_received = g_pDlg->m_received_RL_Confirm_Flag.load();
-
-		if (g_pDlg->m_tcpip.is_new_message_received.load() == true)
-		{
+			RL_confirm = g_pDlg->m_received_RL_Confirm_Flag.load();
+			episode_ended = g_pDlg->m_received_RL_Episode_Flag.load();
 			g_pDlg->m_tcpip.rl_pressure_from_server = g_pDlg->m_received_RL_Pressure.load();
-			RL_count += 1;
+			RL_count++;
 
-			printf("RL PC로부터 %d번째 메세지 수신 성공! (RL_P: %f, message_flag: %d, episode_flag: %d) \n",
-				RL_count, g_pDlg->m_tcpip.rl_pressure_from_server.load(), static_cast<int>(g_pDlg->m_tcpip.is_new_message_received.load()), static_cast<int>(g_pDlg->m_tcpip.episode_state_flag.load()));
+			if (episode_ended)
+			{
+				std::random_device rd;
+				std::mt19937 gen(rd());
+				std::uniform_int_distribution<> dist(35, 50);
+				int random_force = dist(gen);
 
-			g_pDlg->m_tcpip.is_new_message_received.store(false);
+				g_pDlg->m_setting.Target_Force_N.store(-1.0f * random_force);
+
+				RL_count = 0;
+				g_pDlg->m_received_RL_Episode_Flag.store(false);
+
+				printf(">> 에피소드 종료! 새 목표 접촉력: %.2f N <<\n", -1.0f * random_force);
+			}
+			else
+			{
+				printf("RL PC로부터 %d번째 메세지 수신 성공! (RL_P: %f) \n",
+					RL_count, g_pDlg->m_tcpip.rl_pressure_from_server.load());
+			}
+			g_pDlg->m_received_RL_Confirm_Flag.store(false);
 		}
 
 		// =========================================================================
@@ -1748,8 +1752,8 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 		log.data.push_back((float)g_pDlg->m_airctrl.feedbackSpindleVoltage());
 
         log.data.push_back((float)g_pDlg->m_received_RL_Pressure);
-		log.data.push_back(g_pDlg->m_received_RL_Confirm_Flag.load());
-		log.data.push_back(g_pDlg->m_received_RL_Episode_Flag.load());
+		log.data.push_back(RL_confirm);
+		log.data.push_back(episode_ended);
 		{
 			std::lock_guard<std::mutex> lock(g_pDlg->m_logMutex);
 			g_pDlg->m_logQueue.push(log);
@@ -1960,7 +1964,7 @@ void CRobotCommSWDJv5Dlg::OnBnClickedButRobotDisconnect()
 void CRobotCommSWDJv5Dlg::OnBnClickedButHomeInit()
 {
 	//float pos_reset[6] = { 90.0, 0.0, 85.0, -5.0, 90.0, 90.0 };
-	float pos_reset[6] = { 90.0, 0.0, 90.0, 0.0, 80.0, 90.0 };
+	float pos_reset[6] = { 90.0, 0.0, 90.0, 0.0, 80.0, -90.0 };
 	int move_pos_reset = Drfl.movej(pos_reset, 5, 5);
 	if (move_pos_reset)
 	{
@@ -1979,7 +1983,7 @@ void CRobotCommSWDJv5Dlg::OnBnClickedButHomeInit()
 void CRobotCommSWDJv5Dlg::OnBnClickedButHomeMove()
 {
 	// 초기화 자세 이동
-	float home[6] = { 90.0, 0.0, 90.0, 0.0, 90.0, 90.0 };
+	float home[6] = { 90.0, 0.0, 90.0, 0.0, 90.0, -90.0 };
 	int move_home_msg1 = Drfl.movej(home, 5.0, 5.0);
 	if (move_home_msg1)
 	{
