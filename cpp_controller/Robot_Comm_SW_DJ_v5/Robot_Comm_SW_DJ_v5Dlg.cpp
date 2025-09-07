@@ -550,7 +550,7 @@ UINT CRobotCommSWDJv5Dlg::Thread_Servo(LPVOID pParam)
 	// QueryPerformanceFrequency => 1초당 tick 수
 	LARGE_INTEGER qpf;
 	QueryPerformanceFrequency(&qpf);
-	const LONGLONG one_ms_tick = qpf.QuadPart / 100LL;
+	const LONGLONG one_ms_tick = qpf.QuadPart / 1000LL;
 
 	// QueryPerformanceCounter => 시작 시각
 	LARGE_INTEGER startTick;
@@ -1354,7 +1354,7 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 	// QueryPerformanceFrequency → 1초당 tick 수
 	LARGE_INTEGER qpf;
 	QueryPerformanceFrequency(&qpf);
-	const LONGLONG one_ms_tick = qpf.QuadPart / 100LL;
+	const LONGLONG one_ms_tick = qpf.QuadPart / 1000LL;
 
 	// QueryPerformanceCounter → 시작 시각
 	LARGE_INTEGER startTick;
@@ -1667,8 +1667,8 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 				g_pDlg->m_servoctrl.vz_cmd.store(g_pDlg->m_setting.vz_mms);									// [mm/s]
 
 				// [MPa] 출력 챔버 공압 최종 설정 (PID 제어값 + RL 제어값)
-				//g_pDlg->m_airctrl.setDesiredChamberPressure(g_pDlg->m_airctrl.desiredChamberPressure() + g_pDlg->m_tcpip.rl_pressure_from_server);
-				g_pDlg->m_airctrl.setDesiredChamberPressure(g_pDlg->m_airctrl.desiredChamberPressure());
+				g_pDlg->m_airctrl.setDesiredChamberPressure(g_pDlg->m_airctrl.desiredChamberPressure() + g_pDlg->m_tcpip.rl_pressure_from_server);
+				//g_pDlg->m_airctrl.setDesiredChamberPressure(g_pDlg->m_airctrl.desiredChamberPressure());
 			}
 			// Control Step.3: 평면 경로 구동 마무리
 			else if (g_pDlg->m_setting.Control_Step == 3)
@@ -1754,6 +1754,8 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
         log.data.push_back((float)g_pDlg->m_received_RL_Pressure);
 		log.data.push_back(RL_confirm);
 		log.data.push_back(episode_ended);
+		/*log.data.push_back((float)g_pDlg->m_received_RL_Confirm_Flag.load());
+		log.data.push_back((float)g_pDlg->m_received_RL_Episode_Flag.load());*/
 		{
 			std::lock_guard<std::mutex> lock(g_pDlg->m_logMutex);
 			g_pDlg->m_logQueue.push(log);
@@ -1793,6 +1795,7 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 	g_pDlg->m_flags.robotRunning.store(false);
 	return 0;
 }
+
 // =========================================
 // 데이터 저장 쓰레드 함수
 UINT CRobotCommSWDJv5Dlg::Thread_Logger(LPVOID pParam)
@@ -2595,7 +2598,6 @@ void CRobotCommSWDJv5Dlg::OnBnClickedButTcpsend()
 void CRobotCommSWDJv5Dlg::OnRlDataReceived(const RLAgentPacket& packet)
 {
 	// 모든 처리가 끝난 깨끗한 구조체를 바로 사용
-
 	// 원자적 멤버 변수에 값 저장 (스레드 안전)
 	m_received_RL_Pressure.store(packet.RL_ResidualP);
 	m_received_RL_Confirm_Flag.store(packet.RL_MessagerecvFlag == 1);

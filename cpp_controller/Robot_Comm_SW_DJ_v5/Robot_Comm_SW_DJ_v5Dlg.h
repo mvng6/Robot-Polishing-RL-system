@@ -62,8 +62,8 @@ struct Setting {
 	
 	std::atomic<float> Contact_time{};						// 접촉 시간 [s]
 
-	std::atomic<float> set_Hz = 100.0f;					// while 루프 제어 주기 [Hz]
-	std::atomic<float> set_Hz_servo = 100.0f;				// 서보 제어 주기 [Hz] (곡면 구동의 경우 500Hz로 동작하기 때문에 개별적으로 설정 필요)
+	std::atomic<float> set_Hz = 1000.0f;					// while 루프 제어 주기 [Hz]
+	std::atomic<float> set_Hz_servo = 1000.0f;				// 서보 제어 주기 [Hz] (곡면 구동의 경우 500Hz로 동작하기 때문에 개별적으로 설정 필요)
 	float get_set_ns() const {								// 나노초 단위 [ns]
 		return 1e9f / set_Hz.load();
 	}

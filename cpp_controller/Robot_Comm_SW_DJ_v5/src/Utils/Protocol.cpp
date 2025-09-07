@@ -86,7 +86,8 @@ bool UnpackRLAgentCommand(const char* buffer, int length, RLAgentPacket& outPack
 	outPacket.RL_ResidualP = rl_Pressure;
 
 	outPacket.RL_MessagerecvFlag = received_packet.RL_MessagerecvFlag;
-	outPacket.checksum = received_checksum; // 호스트 바이트 순서로 저장
+	outPacket.RL_EpisodeFlag = received_packet.RL_EpisodeFlag;
+	outPacket.checksum = received_checksum;
 
 	return true;
 }
