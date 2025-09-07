@@ -1,0 +1,30 @@
+# 최종 마무리 
+git add .
+git commit -m "내용 작성"
+git push 또는 git push origin HEAD
+git branch
+  main
+* rl
+git switch main
+git merge rl
+git add .
+git push
+
+
+# 출근했을 때
+git pull
+katech@KATECH:~/Robot-Polishing-RL-system$ git branch
+* main
+  rl
+katech@KATECH:~/Robot-Polishing-RL-system$ git switch rl
+Switched to branch 'rl'
+Your branch is up to date with 'origin/rl'.
+katech@KATECH:~/Robot-Polishing-RL-system$ git branch
+  main
+* rl
+katech@KATECH:~/Robot-Polishing-RL-system$ git merge main
+Already up to date.
+katech@KATECH:~/Robot-Polishing-RL-system$ git pull
+Already up to date.
+
+

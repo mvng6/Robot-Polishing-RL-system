@@ -1,0 +1,5 @@
+    def _log(self, level, message):
+        """통합된 로깅 함수 - PneumaticPolishingEnvironment 클래스용"""
+        timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        level_icons = {"INFO": "ℹ️", "SUCCESS": "✅", "WARNING": "⚠️", "ERROR": "❌", "DEBUG": "🔍"}
+        icon = level_icons.get(level, "ℹ️")
