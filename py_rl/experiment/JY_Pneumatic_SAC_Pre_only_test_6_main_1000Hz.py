@@ -258,7 +258,7 @@ class ResidualRLCommunicator:
         self.packet_size_errors = 0
         self.last_packet_time = None
         self.connection_start_time = None
-        self.expected_packet_interval = 0.01 # 로봇제어PC에서 100Hz로 전송
+        self.expected_packet_interval = 0.001 # 로봇제어PC에서 1000Hz로 전송
         self.packet_receive_times = []
         self.packet_sequence_numbers = []
         self.missed_packets = 0
@@ -329,11 +329,11 @@ class ResidualRLCommunicator:
             
             # 100Hz (10ms 간격)로 수신 시도
             if current_time >= next_receive_time:
-                next_receive_time += 0.01  # 10ms 간격
+                next_receive_time += 0.001  # 10ms 간격
                 
                 try:
                     # 타임아웃을 10ms로 설정 (100Hz 주기에 맞춤)
-                    self.conn.settimeout(0.01)
+                    self.conn.settimeout(0.001)
                     data = self._recv_exact(self.CPP_TO_PY_PACKET_SIZE)
                     if data:
                         state, sander_active = self._process_packet(data)
@@ -458,7 +458,7 @@ class ResidualRLCommunicator:
                                   bool(timing_accurate), 
                                   bool(episode_done))
             checksum = self.calculate_crc16(data_part)
-            # 3. 최종 패킷 (SOF, float, unsigned char, unsigned char, checksum[uint16])
+            # 3. 최종 패킷 (SOF, float, unsigned char, unsigned char, checksum)
             final_packet = struct.pack(self.PY_TO_CPP_PACKET_FORMAT, 
                                      self.PY_TO_CPP_SOF, 
                                      float(rl_residual), 
@@ -466,7 +466,7 @@ class ResidualRLCommunicator:
                                      bool(episode_done), 
                                      checksum)
             
-            # 📊 패킷 모니터링: 전송 예정 패킷 데이터 기록
+            # 패킷 모니터링: 전송 예정 패킷 데이터 기록
             if packet_monitor is not None:
                 packet_monitor['intended_packet'] = {
                     'sof_hex': f"0x{self.PY_TO_CPP_SOF:04X}",
@@ -482,7 +482,7 @@ class ResidualRLCommunicator:
             # 4. 송신
             self.conn.sendall(final_packet)
             
-            # 📊 패킷 모니터링: 실제 전송된 패킷 데이터 기록
+            # 패킷 모니터링: 실제 전송된 패킷 데이터 기록
             if packet_monitor is not None:
                 packet_monitor['sent_packet'] = {
                     'sof_hex': f"0x{self.PY_TO_CPP_SOF:04X}",
@@ -501,7 +501,7 @@ class ResidualRLCommunicator:
             return True
         except Exception as e:
             self._log("ERROR", f"residual 전송 오류: {e}")
-            # 📊 패킷 모니터링: 전송 실패 기록
+            # 패킷 모니터링: 전송 실패 기록
             if packet_monitor is not None:
                 packet_monitor['sent_packet'] = {
                     'send_success': False,
