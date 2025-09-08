@@ -37,13 +37,13 @@ Python RL 에이전트는 로봇의 상태(접촉력, 오차 등)를 실시간�
 |                  | PID Force        |    |                      |    |       Soft Actor-Critic        |   |
 |                  | Controller       |    |                      |    |             (SAC)              |   |
 |                  +------------------+    |                      |    +--------------------------------+   |
-|                          |               |         State        |                      ^                 |
-|                   (Base Pressure)        |  (Force, Error, etc.)|                      |                 |
-|                          |               |--------------------->|               (Reward Calc)            |
-|                          v               |                      |                      |                 |
-|   +-----------+ <---(+)---> +----------+ |                      |    +-----------------+----------------+ |
-|   | Final     |      ^      | Residual | |      Residual      |    | Replay Buffer & Policy Update   | |
-|   | Pressure  |      |      | Pressure | |       Action       |    +---------------------------------+ |
+|                          |               |         State        |                      ^                  |
+|                   (Base Pressure)        |  (Force, Error, etc.)|                      |                  |
+|                          |               |--------------------->|               (Reward Calc)             |
+|                          v               |                      |                      |                  |
+|   +-----------+ <---(+)---> +----------+ |                      |    +-----------------+---------------+  |
+|   | Final     |      ^      | Residual | |      Residual        |    | Replay Buffer & Policy Update   |  |
+|   | Pressure  |      |      | Pressure | |       Action         |    +---------------------------------+  |
 |   | Command   |      |      | (from RL)| | <--------------------|                                         |
 |   +-----------+      +      +----------+ |                      |                                         |
 |       |                                  |       TCP/IP         |                                         |
