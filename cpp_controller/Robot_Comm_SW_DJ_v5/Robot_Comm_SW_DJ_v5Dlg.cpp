@@ -1370,7 +1370,7 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 
 	// ===============================================
 	// 실험 설정
-	g_pDlg->m_setting.Target_Force_N.store(-30.0f);				// 목표 접촉력 설정 (N)   [음수로 설정해줘야 로봇 베이스 좌표계와 동일한 방향]
+	g_pDlg->m_setting.Target_Force_N.store(-35.0f);				// 목표 접촉력 설정 (N)   [음수로 설정해줘야 로봇 베이스 좌표계와 동일한 방향]
 	g_pDlg->m_setting.Force_limit_N.store(50.0f);				// 접촉력 제한값 설정 (N)
 	g_pDlg->m_setting.Target_vz.store(5.0f);					// 목표 접촉 속도 설정 (mm/s) [양수로 설정해줘야 로봇 베이스 좌표계와 동일한 방향]
 	int Saturation_time = 5000;									// 접촉 유지 시간 설정 (ms)
@@ -1419,11 +1419,15 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 
 	int RL_count = 0;
 
-	// ===============================================
 	// 데이터 기록 시작
 	g_pDlg->m_flags.logThreadRunning.store(true);
 	g_pDlg->m_pThread_Logger = AfxBeginThread(Thread_Logger, g_pDlg);
 
+	// ===============================================
+	// ✨ 추가된 코드: 메시지 수신 주기 측정을 위한 변수
+	// ===============================================
+	static bool is_first_message = true;
+	static auto last_message_time = std::chrono::steady_clock::now();
 	t_start = system_clock::now();
 
 	printf("에피소드 학습을 위한 로봇 동작 시작!\n");
@@ -1441,9 +1445,25 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 		// =========================================================================
 		// Episode가 종료된 경우 , RL Episode Flag가 true로 설정됨
 		//	 => 목표 접촉력 변경
-
 		if (g_pDlg->m_received_RL_Confirm_Flag.load() == true)
 		{
+			// ✨ 주기 측정 로직 시작
+			auto current_message_time = std::chrono::steady_clock::now();
+			double reception_period_ms = 0.0;
+
+			if (!is_first_message) {
+				// 첫 메시지가 아니라면, 이전 메시지와의 시간 차이를 계산
+				auto duration = std::chrono::duration<double, std::milli>(current_message_time - last_message_time);
+				reception_period_ms = duration.count();
+			}
+			else {
+				// 첫 메시지인 경우 플래그를 변경
+				is_first_message = false;
+			}
+			// 다음 측정을 위해 현재 시각을 저장
+			last_message_time = current_message_time;
+			// ✨ 주기 측정 로직 종료
+
 			RL_confirm = g_pDlg->m_received_RL_Confirm_Flag.load();
 			episode_ended = g_pDlg->m_received_RL_Episode_Flag.load();
 			g_pDlg->m_tcpip.rl_pressure_from_server = g_pDlg->m_received_RL_Pressure.load();
@@ -1453,7 +1473,7 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 			{
 				std::random_device rd;
 				std::mt19937 gen(rd());
-				std::uniform_int_distribution<> dist(35, 50);
+				std::uniform_int_distribution<> dist(30, 40);
 				int random_force = dist(gen);
 
 				g_pDlg->m_setting.Target_Force_N.store(-1.0f * random_force);
@@ -1465,9 +1485,16 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 			}
 			else
 			{
-				printf("RL PC로부터 %d번째 메세지 수신 성공! (RL_P: %f) \n",
-					RL_count, g_pDlg->m_tcpip.rl_pressure_from_server.load());
+				if (reception_period_ms > 0.0) {
+					printf("RL PC로부터 %d번째 메세지 수신 성공! (RL_P: %f) | 수신 주기: %.2f ms\n",
+						RL_count, g_pDlg->m_tcpip.rl_pressure_from_server.load(), reception_period_ms);
+				}
+				else {
+					printf("RL PC로부터 %d번째 메세지 수신 성공! (RL_P: %f) | (첫 메시지)\n",
+						RL_count, g_pDlg->m_tcpip.rl_pressure_from_server.load());
+				}
 			}
+			
 			g_pDlg->m_received_RL_Confirm_Flag.store(false);
 		}
 
@@ -1668,7 +1695,6 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 
 				// [MPa] 출력 챔버 공압 최종 설정 (PID 제어값 + RL 제어값)
 				g_pDlg->m_airctrl.setDesiredChamberPressure(g_pDlg->m_airctrl.desiredChamberPressure() + g_pDlg->m_tcpip.rl_pressure_from_server);
-				//g_pDlg->m_airctrl.setDesiredChamberPressure(g_pDlg->m_airctrl.desiredChamberPressure());
 			}
 			// Control Step.3: 평면 경로 구동 마무리
 			else if (g_pDlg->m_setting.Control_Step == 3)
@@ -1754,8 +1780,6 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
         log.data.push_back((float)g_pDlg->m_received_RL_Pressure);
 		log.data.push_back(RL_confirm);
 		log.data.push_back(episode_ended);
-		/*log.data.push_back((float)g_pDlg->m_received_RL_Confirm_Flag.load());
-		log.data.push_back((float)g_pDlg->m_received_RL_Episode_Flag.load());*/
 		{
 			std::lock_guard<std::mutex> lock(g_pDlg->m_logMutex);
 			g_pDlg->m_logQueue.push(log);
