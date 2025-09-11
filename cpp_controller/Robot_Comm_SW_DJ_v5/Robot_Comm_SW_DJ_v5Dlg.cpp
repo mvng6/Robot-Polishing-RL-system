@@ -1371,7 +1371,7 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 	// ===============================================
 	// 실험 설정
 	g_pDlg->m_setting.Target_Force_N.store(-35.0f);				// 목표 접촉력 설정 (N)   [음수로 설정해줘야 로봇 베이스 좌표계와 동일한 방향]
-	g_pDlg->m_setting.Force_limit_N.store(50.0f);				// 접촉력 제한값 설정 (N)
+	g_pDlg->m_setting.Force_limit_N.store(70.0f);				// 접촉력 제한값 설정 (N)
 	g_pDlg->m_setting.Target_vz.store(5.0f);					// 목표 접촉 속도 설정 (mm/s) [양수로 설정해줘야 로봇 베이스 좌표계와 동일한 방향]
 	int Saturation_time = 5000;									// 접촉 유지 시간 설정 (ms)
 	g_pDlg->m_setting.First_Contact.store(true);
@@ -1473,7 +1473,7 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 			{
 				std::random_device rd;
 				std::mt19937 gen(rd());
-				std::uniform_int_distribution<> dist(30, 40);
+				std::uniform_int_distribution<> dist(35, 45);
 				int random_force = dist(gen);
 
 				g_pDlg->m_setting.Target_Force_N.store(-1.0f * random_force);
