@@ -1447,7 +1447,7 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 		//	 => 목표 접촉력 변경
 		if (g_pDlg->m_received_RL_Confirm_Flag.load() == true)
 		{
-			// ✨ 주기 측정 로직 시작
+			// 메세지 수신 주기 측정 로직 시작
 			auto current_message_time = std::chrono::steady_clock::now();
 			double reception_period_ms = 0.0;
 
@@ -1462,7 +1462,7 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 			}
 			// 다음 측정을 위해 현재 시각을 저장
 			last_message_time = current_message_time;
-			// ✨ 주기 측정 로직 종료
+			// 메세지 수신 주기 측정 로직 종료
 
 			RL_confirm = g_pDlg->m_received_RL_Confirm_Flag.load();
 			episode_ended = g_pDlg->m_received_RL_Episode_Flag.load();
@@ -1473,7 +1473,7 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 			{
 				std::random_device rd;
 				std::mt19937 gen(rd());
-				std::uniform_int_distribution<> dist(35, 45);
+				std::uniform_int_distribution<> dist(35, 50);
 				int random_force = dist(gen);
 
 				g_pDlg->m_setting.Target_Force_N.store(-1.0f * random_force);
@@ -1481,7 +1481,9 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 				RL_count = 0;
 				g_pDlg->m_received_RL_Episode_Flag.store(false);
 
-				printf(">> 에피소드 종료! 새 목표 접촉력: %.2f N <<\n", -1.0f * random_force);
+				g_pDlg->m_setting.Control_Step = 99;			// 에피소드 종료로 인한 환경 리셋
+
+				printf(">> 환경 리셋! 새 목표 접촉력: %.2f N <<\n", -1.0f * random_force);
 			}
 			else
 			{
@@ -1751,7 +1753,57 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 			// Control Step.99: 에피소드 종료로 인한 환경 리셋
 			else if (g_pDlg->m_setting.Control_Step == 99)
 			{
+				if (g_pDlg->m_setting.First_Contact.load() == true)
+				{
+					// 1. 상태 초기화
+					rampStartTime = system_clock::now();
+					g_pDlg->m_setting.First_Contact.store(false);
+					g_pDlg->m_flags.RL_sanderactive_flag.store(false);
 
+					// 2. 동작 시작 시점의 상태 저장
+					start_pos_z = Th_robotData_flat.flangePos[2];
+
+					// 3. 상승(Retract) 프로파일 설정
+					retractConfig.direction = 1;								// 상승
+					retractConfig.max_velocity = g_pDlg->m_setting.Target_vz;	// 상승 속도
+					retractConfig.final_velocity = 0.0f;						// 목표 지점에서 정지
+					retractConfig.target_z = 400.0f;							// 환경 리셋용 상승된 z 위치 설정
+					retractConfig.ramp_duration_sec = 3;						// 상승 가/감속 시간
+					retractConfig.move_distance = std::abs(retractConfig.target_z - start_pos_z); // 총 이동 거리 계산
+
+					// 4. 스핀들 공압 즉시 OFF
+					g_pDlg->m_airctrl.setDesiredChamberPressure(0.0);			// 챔버 공압 OFF
+					g_pDlg->m_airctrl.setDesiredSpindlePressure(0.0);			// 스핀들 공압 OFF
+
+					Status_gui_str.Format(_T("[평면 구동] Control Step 99: 에피소드 종료로 인한 환경 초기화 시작!"));
+					g_pDlg->var_status_gui.SetWindowTextW(Status_gui_str);
+				}
+				else
+				{
+					auto now = std::chrono::system_clock::now();
+					float current_pos_z = Th_robotData_flat.flangePos[2];
+
+					// 프로파일 기반 로봇 상승 로직
+					double motion_elapsed_sec = std::chrono::duration<double>(now - rampStartTime).count();
+					float final_target_vz = g_pDlg->m_velProfile.calculate(retractConfig, motion_elapsed_sec, current_pos_z, start_pos_z);
+					g_pDlg->m_setting.vz_mms.store(final_target_vz);
+
+					// 초기 로봇 시작 위치 이상으로 높은 위치에 TCP가 도달하면 구동 종료
+					if (retractConfig.target_z + 5.0f  <= Th_robotData_flat.flangePos[2])
+					{
+						g_pDlg->m_setting.vz_mms = 0.0;
+						g_pDlg->m_setting.Control_Step = 0;
+
+						// 챔버 공압 ON (초기 환경 압력 설정)
+						g_pDlg->m_airctrl.setDesiredChamberPressure(0.2);
+
+						Status_gui_str.Format(_T("[평면 구동] Control Step 99: 환경 리셋 완료!!!"));
+						g_pDlg->var_status_gui.SetWindowTextW(Status_gui_str);
+					}
+				}
+				g_pDlg->m_servoctrl.vz_cmd.store(g_pDlg->m_setting.vz_mms);	// [mm/s]
+				Status_gui_str.Format(_T("[평면 구동] Control Step 99: 환경 초기화를 위한 로봇 상승중... (Vz: %.2f)"), g_pDlg->m_setting.vz_mms.load());
+				g_pDlg->var_status_gui.SetWindowTextW(Status_gui_str);
 			}
 		}
 
