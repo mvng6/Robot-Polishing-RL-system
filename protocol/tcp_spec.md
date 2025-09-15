@@ -57,7 +57,7 @@
 | `Residual Pressure` | `float`          | 4            | 강화학습 에이전트로부터 계산된 잔차 공압 값 (단위: MPa) |
 | `Message Send Flag` | `unsigned char`  | 1            | 서버(Python)로부터 메시지 수신 확인용 (0: 미수신, 1: 수신) |
 | `Episode On Flag`   | `unsigned char`  | 1            | 서버의 강화학습 에피소드 종료 여부 (0: 에피소드 종료 X, 1: 에피소드 종료 O) |
-| `Episode On Flag`   | `unsigned char`  | 1            | 서버의 강화학습 에피소드 종료 여부 (0: 에피소드 종료 X, 1: 에피소드 종료 O) |
+| `Learning done Flag`| `unsigned char`  | 1            | 강화학습 종료 여부 (0: 강화학습 종료 X, 1: 강화학습 종료 O) |
 | `checksum`          | `unsigned short` | 2            | `rlVoltageValue`부터 `confirmFlag`까지의 CRC-16 값 |
 
 ---
