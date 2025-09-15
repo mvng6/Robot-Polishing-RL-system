@@ -3,7 +3,7 @@ close all;
 clc;
 
 %% C++ 기록 데이터
-data = readmatrix("Data_Speedl_F_30_P_80.00_I_130.00_D_0.50.csv");
+data = readmatrix("Data_Speedl_F_35_P_80.00_I_130.00_D_0.50.csv");
 
 t = (data(:,1) - data(1,1)) * 0.001;
 
@@ -62,41 +62,41 @@ end
 %%
 figure;
 subplot(3,1,1);
-plot(RL_u);
+% plot(RL_u);
 hold on;
-% plot(before_rl_data,'r--');
-% plot(after_rl_data,'b-.');
-% legend('C++','Before send','After send','Location','northeastoutside');
-% legend('Before send','After send','Location','northeastoutside');
+plot(before_rl_data,'r--');
+plot(after_rl_data,'b-.');
+legend('C++','Before send','After send','Location','northeastoutside');
+legend('Before send','After send','Location','northeastoutside');
 
 subplot(3,1,2);
-plot(RL_send_flag);
+% plot(RL_send_flag);
 hold on;
-% plot(before_msg_flag,'r--');
-% plot(after_msg_flag,'b-.');
-% legend('C++','Before send','After send','Location','northeastoutside');
-% legend('Before send','After send','Location','northeastoutside');
+plot(before_msg_flag,'r--');
+plot(after_msg_flag,'b-.');
+legend('C++','Before send','After send','Location','northeastoutside');
+legend('Before send','After send','Location','northeastoutside');
 
 subplot(3,1,3);
-plot(RL_ep_flag);
+% plot(RL_ep_flag);
 hold on;
-% plot(before_ep_flag,'r--');
-% plot(after_ep_flag,'b-.');
-% legend('C++','Before send','After send','Location','northeastoutside');
-% legend('Before send','After send','Location','northeastoutside');
+plot(before_ep_flag,'r--');
+plot(after_ep_flag,'b-.');
+legend('C++','Before send','After send','Location','northeastoutside');
+legend('Before send','After send','Location','northeastoutside');
 
 
 %%
-% figure;
-% subplot(3,1,1);
-% plot(t,RL_u);
-% xlim([0 t(end)]);
-% ylabel('RL u')
-% subplot(3,1,2);
-% plot(t,RL_send_flag);
-% xlim([0 t(end)]);
-% ylabel('Send Message Flag');
-% subplot(3,1,3);
-% plot(t,RL_ep_flag);
-% xlim([0 t(end)]);
-% ylabel('Episode Flag');
+figure;
+subplot(3,1,1);
+plot(t,RL_u);
+xlim([0 t(end)]);
+ylabel('RL u')
+subplot(3,1,2);
+plot(t,RL_send_flag);
+xlim([0 t(end)]);
+ylabel('Send Message Flag');
+subplot(3,1,3);
+plot(t,RL_ep_flag);
+xlim([0 t(end)]);
+ylabel('Episode Flag');
