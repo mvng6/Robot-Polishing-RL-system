@@ -1735,8 +1735,7 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 					g_pDlg->m_setting.vz_mms.store(final_target_vz);
 
 					// 초기 로봇 시작 위치 이상으로 높은 위치에 TCP가 도달하면 구동 종료
-					//if (initialPosArray_flange[2] <= Th_robotData_flat.flangePos[2])
-					if (422.5 <= Th_robotData_flat.flangePos[2])
+					if (initialPosArray_flange[2] <= Th_robotData_flat.flangePos[2])
 					{
 						g_pDlg->m_setting.vz_mms = 0.0;
 						Status_gui_str.Format(_T("[평면 구동] Control Step 3: 로봇 구동 종료"));
@@ -1748,6 +1747,11 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 				g_pDlg->m_servoctrl.vz_cmd.store(g_pDlg->m_setting.vz_mms);	// [mm/s]
 				Status_gui_str.Format(_T("[평면 구동] Control Step 3: 프로파일 상승 중... (Vz: %.2f)"), g_pDlg->m_setting.vz_mms.load());
 				g_pDlg->var_status_gui.SetWindowTextW(Status_gui_str);
+			}
+			// Control Step.99: 에피소드 종료로 인한 환경 리셋
+			else if (g_pDlg->m_setting.Control_Step == 99)
+			{
+
 			}
 		}
 
