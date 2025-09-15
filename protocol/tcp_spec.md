@@ -41,7 +41,7 @@
 | `Force Error`        | `float`            | 4            | 접촉력 오차 (단위: N)                          |
 | `Force Error dot`    | `float`            | 4            | 접촉력 오차의 미분 값 (단위: N)                 |
 | `Force Error int`    | `float`            | 4            | 접촉력 오차의 적분 값 (단위: N)                |
-| `pidoutput'          | `float`            | 4            | PID 제어 값                                            |
+| `pidoutput`          | `float`            | 4            | PID 제어 값                                            |
 | `Sander Active Flag` | `unsigned char`    | 1            | 샌더 활성화 상태 (0: 비활성, 1: 활성)                    |
 | `checksum`           | `unsigned short`   | 2            | `Current Forc`부터 `Sander Active Flag`까지의 CRC-16 값 |
 
