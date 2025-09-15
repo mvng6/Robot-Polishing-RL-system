@@ -453,7 +453,7 @@ class ResidualRLCommunicator:
         self.CPP_TO_PY_PACKET_SIZE = 29
         self.CPP_TO_PY_SOF = 0xAAAA
         self.PY_TO_CPP_PACKET_FORMAT = ">HfBBBH"  # SOF, rl_residual, timing_accurate, episode_done, learning_done, checksum
-        self.PY_TO_CPP_PACKET_SIZE = 11  # 2 + 4 + 1 + 1 + 1 + 2 = 11 bytes
+        self.PY_TO_CPP_PACKET_SIZE = 11  # SOF(2) + rl_residual(4) + timing_accurate(1) + episode_done(1) + learning_done(1) + checksum(2) = 11 bytes
         self.PY_TO_CPP_SOF = 0xBBBB
         self.latest_state = None
         self.latest_sander_active = False
@@ -1035,17 +1035,23 @@ class PneumaticPolishingEnvironment:
             if ep > 0:  # 첫 번째 에피소드가 아닌 경우에만 대기
                 self._log("INFO", "🔄 로봇 리셋 완료 후 새 에피소드 시작 대기 중... (sander_active=1)")
                 wait_start = time.perf_counter()
+                waiting_message_shown = False  # 대기 메시지 표시 플래그
                 while not self.episode_transition_detected:
                     state, sander_active = self.comm.get_latest_state()
+                    
+                    # ==== ADDED: 대기 중 상태를 1번만 표시 ====
+                    if state is not None and not waiting_message_shown and not sander_active:
+                        self._log("INFO", "⏳ 로봇 z축 이동 중... sander_active=0 대기 중")
+                        waiting_message_shown = True
+                    
                     if sander_active and self.waiting_for_episode_start:
-                        self._log("INFO", "🎬 새 에피소드 시작 감지! (sander_active: 0→1)")
+                        wait_duration = time.perf_counter() - wait_start
+                        self._log("INFO", f"🎬 새 에피소드 시작 감지! (sander_active: 0→1) - {wait_duration:.1f}초 대기")
                         self.waiting_for_episode_start = False
                         self.episode_transition_detected = True
                         self.episode_end_confirmed = False
                         break
-                    if time.perf_counter() - wait_start > 60:
-                        self._log("WARNING", f"⚠️ 에피소드 {ep+1}에서 sander_active=1 대기 타임아웃")
-                        break
+                    
                     time.sleep(0.1)
             
             episode_start_state, episode_start_sander_active = self.comm.get_latest_state()
@@ -1088,9 +1094,11 @@ class PneumaticPolishingEnvironment:
                             state = np.array([0.0, -30.0, -30.0, 0.0, 0.0, 0.0], dtype=np.float32)
                             sander_active = False
                             self._log("DEBUG", f"데이터 없음 - 기본값 사용 (step {self.episode_step})")
+                        
                     else:
                         state, sander_active = res
                         self.last_valid_state = state.copy()
+                        
                         self.last_sander_active = sander_active
                         episode_packets_received += 1
                         self.previous_target_force = state[1]
@@ -1274,11 +1282,11 @@ class PneumaticPolishingEnvironment:
             self.agent.episode_rewards.append(self.current_episode_reward)
             
             # ==== ADDED: 에피소드 종료 후 로봇 리셋 대기 ====
-            if self.episode_end_confirmed:
-                self._log("INFO", "🔄 로봇이 z축으로 이동하여 공압 툴 환경을 리셋하는 중...")
-                self._log("INFO", "⏳ 다음 에피소드 시작을 위해 sander_active=1 대기 중...")
-                # 다음 에피소드에서 sander_active=1을 감지할 수 있도록 플래그 설정
-                self.waiting_for_episode_start = True
+            # 모든 에피소드 완료 시 다음 에피소드 시작 대기 플래그 설정
+            self._log("INFO", "🔄 로봇이 z축으로 이동하여 공압 툴 환경을 리셋하는 중...")
+            self._log("INFO", "⏳ 다음 에피소드 시작을 위해 sander_active=1 대기 중...")
+            # 다음 에피소드에서 sander_active=1을 감지할 수 있도록 플래그 설정
+            self.waiting_for_episode_start = True
             
             if len(self.agent.episode_rewards) > self.agent.max_rewards_history:
                 self.agent.episode_rewards = self.agent.episode_rewards[-self.agent.max_rewards_history:]
@@ -1325,6 +1333,7 @@ class PneumaticPolishingEnvironment:
             self._log("INFO", "✅ Reward breakdown 저장 완료!")
         except Exception as e:
             self._log("ERROR", f"Reward breakdown 저장 실패: {e}")
+        
 
         self._log("INFO", "\n🎯 최적화된 학습 완료!")
         self._log("INFO", f"✅ {episodes}개 에피소드 성공적으로 완료")
@@ -1374,6 +1383,8 @@ def signal_handler(signum, frame):
                 env.rlogger.flush_if_needed(current_episode, force=True, episode_rewards=env.agent.episode_rewards)
             except Exception as e:
                 print(f"⚠️ reward breakdown flush 실패: {e}")
+            
+            
             print("✅ 데이터 저장 완료!")
         except Exception as e:
             print(f"❌ 데이터 저장 실패: {e}")
@@ -1388,11 +1399,11 @@ if __name__ == "__main__":
     SEND_FREQUENCY_HZ = 100
     RECV_FREQUENCY_HZ = 1000
     config = create_config(SEND_FREQUENCY_HZ, RECV_FREQUENCY_HZ)
-    print("🚀 TEST VERSION 8: JY_Pneumatic_SAC_Pre_only_test_8.py")
+    print("🚀 TEST VERSION 9: JY_Pneumatic_SAC_Pre_only_test_9_main.py")
     print(f"⚡ 송신 주파수: {SEND_FREQUENCY_HZ}Hz (간격: {config['TICK_SEC']:.3f}초)")
     print(f"📡 수신 주파수: {RECV_FREQUENCY_HZ}Hz (간격: {config['RECV_INTERVAL_SEC']:.3f}초)")
     print("=" * 60)
-    np.random.seed(42)
+    np.random.seed(42) 
     torch.manual_seed(42)
     random.seed(42)
     env = PneumaticPolishingEnvironment(config)
