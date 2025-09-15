@@ -56,7 +56,6 @@
 | `sof`               | `unsigned short` | 2            | 패킷 시작 플래그, 항상 `0xBBBB`             |
 | `Residual Pressure` | `float`          | 4            | 강화학습 에이전트로부터 계산된 잔차 공압 값 (단위: MPa) |
 | `Message Send Flag` | `unsigned char`  | 1            | 서버(Python)로부터 메시지 수신 확인용 (0: 미수신, 1: 수신) |
-| `Reset Flag`        | `unsigned char`  | 1            | 목표 접촉력을 따라가지 못하는 경우 환경을 초기화 (0: 초기화 X, 1: 초기화 O) |
 | `Episode On Flag`   | `unsigned char`  | 1            | 서버의 강화학습 에피소드 종료 여부 (0: 에피소드 종료 X, 1: 에피소드 종료 O) |
 | `checksum`          | `unsigned short` | 2            | `rlVoltageValue`부터 `confirmFlag`까지의 CRC-16 값 |
 
