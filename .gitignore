@@ -416,3 +416,6 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+
+# RL 실험 로그 무시
+py_rl/experiment_logs/
