@@ -23,6 +23,7 @@ struct RLAgentPacket {
 	float			RL_ResidualP;				// 서버(RL 에이전트)로부터 계산된 잔차 공압 (4 bytes)
 	bool			RL_MessagerecvFlag;			// 서버(RL 에이전트)로부터 메세지 수신 확인용 플래그 (1 byte) - 0: 메세지 수신 X / 1: 메세지 수신 O
 	bool			RL_EpisodeFlag;				// 서버(RL 에이전트)에서의 에피소드 동작 여부 확인용 플래그 (1 byte)   - 0: 에피소드 동작 O / 1: 에피소드 동작 X
+	bool			RL_EndFlag;					// 서버(RL 에이전트)에서 강화학습 종료 신호 플래그 (1 byte)   - 0: 강화학습 진행 / 1: 강화학습 종료
 	unsigned short	checksum;					// 데이터 무결성 검증 (2 bytes)
 };
 #pragma pack(pop)

@@ -1412,6 +1412,7 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 	const float RL_dt = 0.001f;									// 제어 주기 (초 단위)
 	bool RL_confirm = false;									// RL PC로부터 메세지 수신 확인 플래그 초기화
 	bool episode_ended = false;									// 에피소드 종료 플래그 초기화
+	bool RL_end = false;										// RL 학습 종료 플래그 초기화
 
 	// 적분 와인드업 방지를 위한 한계값
 	const float RL_max_integral_limit = 100.0f;					// 최대 적분 한계값
@@ -1466,6 +1467,7 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 
 			RL_confirm = g_pDlg->m_received_RL_Confirm_Flag.load();
 			episode_ended = g_pDlg->m_received_RL_Episode_Flag.load();
+			RL_end = g_pDlg->m_received_RL_End_Flag.load();
 			g_pDlg->m_tcpip.rl_pressure_from_server = g_pDlg->m_received_RL_Pressure.load();
 			RL_count++;
 
@@ -1481,9 +1483,15 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 				RL_count = 0;
 				g_pDlg->m_received_RL_Episode_Flag.store(false);
 
+				g_pDlg->m_setting.First_Contact.store(true);
 				g_pDlg->m_setting.Control_Step = 99;			// 에피소드 종료로 인한 환경 리셋
 
 				printf(">> 환경 리셋! 새 목표 접촉력: %.2f N <<\n", -1.0f * random_force);
+			}
+			else if (RL_end)
+			{
+				g_pDlg->m_setting.First_Contact.store(true);
+				g_pDlg->m_setting.Control_Step = 3;					// RL 학습 종료로 인한 로봇 구동 종료
 			}
 			else
 			{
@@ -1612,6 +1620,9 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 						g_pDlg->m_setting.vz_mms.store(0.0f);		// [mm/s] 접촉 유지 정지
 						g_pDlg->m_setting.First_Contact.store(true);
 						g_pDlg->m_setting.Control_Step = 2;
+
+						// 힘제어 시퀀스 시작 알림을 위한 서버로 메세지 전송
+						g_pDlg->m_flags.RL_sanderactive_flag.store(true);
 					}
 					g_pDlg->m_setting.Contact_time = static_cast<int>(Saturation_time - t_stamp_cd_ms_float) * 0.001f;
 				}
@@ -1631,9 +1642,6 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 				if (g_pDlg->m_setting.First_Contact.load() == true)
 				{
 					printf("Control Step = 2\n");
-
-					// 서버로 보내기 위한 플래그 설정
-					g_pDlg->m_flags.RL_sanderactive_flag.store(true);
 
 					g_pDlg->m_setting.First_Contact.store(false);
 					g_pDlg->m_setting.vx_mms.store(0.0);					// X축에 대한 이동 방향 & 속도 설정
@@ -1737,7 +1745,7 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 					g_pDlg->m_setting.vz_mms.store(final_target_vz);
 
 					// 초기 로봇 시작 위치 이상으로 높은 위치에 TCP가 도달하면 구동 종료
-					if (initialPosArray_flange[2] <= Th_robotData_flat.flangePos[2])
+					if (initialPosArray_flange[2] -5.0f <= Th_robotData_flat.flangePos[2])
 					{
 						g_pDlg->m_setting.vz_mms = 0.0;
 						Status_gui_str.Format(_T("[평면 구동] Control Step 3: 로봇 구동 종료"));
@@ -1767,7 +1775,7 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 					retractConfig.direction = 1;								// 상승
 					retractConfig.max_velocity = g_pDlg->m_setting.Target_vz;	// 상승 속도
 					retractConfig.final_velocity = 0.0f;						// 목표 지점에서 정지
-					retractConfig.target_z = 400.0f;							// 환경 리셋용 상승된 z 위치 설정
+					retractConfig.target_z = 405.0f;							// 환경 리셋용 상승된 z 위치 설정
 					retractConfig.ramp_duration_sec = 3;						// 상승 가/감속 시간
 					retractConfig.move_distance = std::abs(retractConfig.target_z - start_pos_z); // 총 이동 거리 계산
 
@@ -1789,7 +1797,7 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 					g_pDlg->m_setting.vz_mms.store(final_target_vz);
 
 					// 초기 로봇 시작 위치 이상으로 높은 위치에 TCP가 도달하면 구동 종료
-					if (retractConfig.target_z + 5.0f  <= Th_robotData_flat.flangePos[2])
+					if (395.0f  <= Th_robotData_flat.flangePos[2])
 					{
 						g_pDlg->m_setting.vz_mms = 0.0;
 						g_pDlg->m_setting.Control_Step = 0;
@@ -2682,4 +2690,6 @@ void CRobotCommSWDJv5Dlg::OnRlDataReceived(const RLAgentPacket& packet)
 	m_received_RL_Pressure.store(packet.RL_ResidualP);
 	m_received_RL_Confirm_Flag.store(packet.RL_MessagerecvFlag == 1);
 	m_received_RL_Episode_Flag.store(packet.RL_EpisodeFlag == 1);
+	m_received_RL_End_Flag.store(packet.RL_EndFlag == 1);
+
 }
