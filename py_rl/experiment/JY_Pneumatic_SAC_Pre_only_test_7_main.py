@@ -27,7 +27,7 @@ _BASE_CONFIG = {
     "STATE_DIM": 6,
     "ACTION_DIM": 1,
     "HIDDEN": 256,
-    "LR": 3e-4,
+    "LR": 1e-3,
     "GAMMA": 0.99,
     "TAU": 0.005,
     "AUTO_ENTROPY": True,
@@ -36,11 +36,11 @@ _BASE_CONFIG = {
     "R_MAX":  0.2,
     "R_SLEW_PER_40MS": 0.048,
     # Scheduling - 송신/수신 주파수 설정
-    "SEND_FREQ_HZ": 10,  # 송신 주파수 (Hz)
+    "SEND_FREQ_HZ": 100,  # 송신 주파수 (Hz)
     "RECV_FREQ_HZ": 1000,  # 수신 주파수 (Hz) - 로봇 제어 PC에서 받는 주파수
     "TICK_TOL": 0.02,  # 타이밍 허용 오차 (초)
     # Training
-    "BATCH_SIZE": 64,
+    "BATCH_SIZE": 128,
     "REPLAY_WARMUP": 20,
     # Networking
     "HOST": "0.0.0.0",
@@ -51,8 +51,8 @@ _BASE_CONFIG = {
     "COMM_RETRY_DELAY": 0.1,  # 통신 재시도 지연 (초)
     "MAX_STALE_DATA_TIME": 2.0,  # 최대 데이터 지연 허용 시간 (2초)
     # Episode
-    "EPISODES": 10,
-    "MAX_EPISODE_STEPS": 300,
+    "EPISODES": 100,
+    "MAX_EPISODE_STEPS": 3000,
     # Safety / Reward shaping
     "MAX_FORCE_ERR": 15.0,
     "MAX_PRESS_DELTA": 0.05,
@@ -154,7 +154,7 @@ class Critic(nn.Module):
 # Replay Buffer
 # =========================    
 class ReplayBuffer:
-    def __init__(self, capacity=100000):
+    def __init__(self, capacity=100000): 
         self.buffer = deque(maxlen=capacity)
 
     def push(self, state, action, reward, next_state, done):
@@ -184,7 +184,7 @@ class ResidualSACAgent:
         # 하이퍼파라미터 설정
         self.gamma, self.tau = cfg["GAMMA"], cfg["TAU"]
         # 엔트로피 설정
-        self.alpha = 0.2 # 엔트로피 계수: 탐험-활용 균형 조절
+        self.alpha = 0.05 # 엔트로피 계수: 탐험-활용 균형 조절
         self.auto_entropy_tuning = cfg["AUTO_ENTROPY"]
         # 신경망 생성
         self.actor = Actor(s_dim, a_dim, hidden).to(self.device)
@@ -608,6 +608,11 @@ class PneumaticPolishingEnvironment:
         # 마지막 유효한 상태 저장 (송신 연속성 보장)
         self.last_valid_state = None
         self.last_sander_active = False
+        # Target achieved 추적 변수
+        self.target_achieved_start_time = None
+        self.target_achieved_duration = 0.0
+        self.target_achieved_threshold = 0.5  # ±0.5N 이내
+        self.target_achieved_required_duration = 10.0  # 10초간 유지
         
     def _log(self, level, message):
         """통합된 로깅 함수 - PneumaticPolishingEnvironment 클래스용"""
@@ -622,8 +627,8 @@ class PneumaticPolishingEnvironment:
         icon = level_icons.get(level, "ℹ️")
         print(f"[{timestamp}] {icon} {message}")
 
-    def generate_cumulative_reward_graph(self):
-        """누적 보상 그래프 생성 (Ctrl+C 시 호출)"""
+    def generate_episode_reward_graph(self):
+        """에피소드별 보상 그래프 생성 (Ctrl+C 시 호출)"""
         if not hasattr(self, 'agent') or not self.agent.episode_rewards:
             self._log("WARNING", "생성할 보상 데이터가 없습니다")
             return
@@ -631,21 +636,28 @@ class PneumaticPolishingEnvironment:
         try:
             import matplotlib.pyplot as plt
             
-            # 누적 보상 계산
-            cumulative_rewards = np.cumsum(self.agent.episode_rewards)
-            episodes = list(range(1, len(cumulative_rewards) + 1))
+            # 에피소드별 보상 (누적 보상이 아닌 각 에피소드의 보상)
+            episode_rewards = self.agent.episode_rewards
+            episodes = list(range(1, len(episode_rewards) + 1))
             
             # 그래프 생성
-            plt.figure(figsize=(10, 6))
-            plt.plot(episodes, cumulative_rewards, 'b-', linewidth=2, marker='o', markersize=4)
+            plt.figure(figsize=(12, 6))
+            plt.plot(episodes, episode_rewards, 'b-', linewidth=2, marker='o', markersize=4)
             plt.xlabel('Episode', fontsize=12)
-            plt.ylabel('Cumulative Reward', fontsize=12)
-            plt.title('Cumulative Reward', fontsize=14, fontweight='bold')
+            plt.ylabel('Episode Reward', fontsize=12)
+            plt.title('Episode Rewards Over Time', fontsize=14, fontweight='bold')
             plt.grid(True, alpha=0.3)
+            
+            # 평균선 추가
+            if len(episode_rewards) > 1:
+                avg_reward = np.mean(episode_rewards)
+                plt.axhline(y=avg_reward, color='r', linestyle='--', alpha=0.7, 
+                           label=f'Average: {avg_reward:.2f}')
+                plt.legend()
             
             # 파일명 생성
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"{self.cfg['LOG_DIR']}/cumulative_reward_{timestamp}.png"
+            filename = f"{self.cfg['LOG_DIR']}/episode_rewards_{timestamp}.png"
             
             # 디렉토리 생성
             os.makedirs(os.path.dirname(filename), exist_ok=True)
@@ -655,10 +667,10 @@ class PneumaticPolishingEnvironment:
             plt.savefig(filename, dpi=300, bbox_inches='tight')
             plt.close()
             
-            self._log("INFO", f"📈 누적 보상 그래프 저장: {filename}")
+            self._log("INFO", f"📈 에피소드별 보상 그래프 저장: {filename}")
             
         except Exception as e:
-            self._log("ERROR", f"누적 보상 그래프 생성 오류: {e}")
+            self._log("ERROR", f"에피소드별 보상 그래프 생성 오류: {e}")
     
     # ---- scheduler ----
     def should_send_now(self):
@@ -686,74 +698,98 @@ class PneumaticPolishingEnvironment:
     ############################
     def calculate_reward_exponential(self, state, action_residual, sander_active):
         """
-        강화된 지수적 보상 함수: 큰 오차에 대한 강한 페널티 추가
-        - 장점: 미세 조정 + 큰 오차에 대한 명확한 처벌
-        - 적용: 폴리싱 작업의 정밀도 요구사항에 최적화
+        Course 2 - Stage 1: 지수적 보상 + 스케일 정규화 + 기본 안전성 개선
+        
+        개선사항:
+        1. 스케일 정규화: 각 구성요소를 0~1 범위로 정규화
+        2. 가중치 균형: 구성요소 간 균형 조정  
+        3. 부드러운 안전성: 선형 페널티로 개선
+        4. 연속적 커리큘럼: 급작스러운 보상 변화 제거
+        5. 학습 안정화: 보상 클리핑 및 균형잡힌 가중치
         """
         current_force, target_force = state[0], state[1]
         force_error, force_error_dot = state[2], state[3]
         
-        # === 지수적 근접 보상 (핵심) ===
         force_err = abs(force_error)
+        residual_change = abs(action_residual - self.prev_residual)
         
-        # 1) 지수적 추적 보상 (0~3.0 범위) - 오차가 작을수록 지수적 증가
-        tracking_reward = 3.0 * np.exp(-force_err * 1.5)
+        # === 개선된 지수적 보상 구조 (0~1 범위로 정규화) ===
         
-        # 2) 🚨 NEW: 큰 오차에 대한 강한 페널티 시스템
-        if force_err > 15.0:
-            # 15N 초과 시 매우 강한 페널티
-            large_error_penalty = -10.0 * (force_err - 15.0) / 5.0  # -10 to -50 범위
-        elif force_err > 10.0:
-            # 10-15N 시 강한 페널티  
-            large_error_penalty = -5.0 * (force_err - 10.0) / 5.0   # -5 to -10 범위
-        elif force_err > 5.0:
-            # 5-10N 시 보통 페널티
-            large_error_penalty = -2.0 * (force_err - 5.0) / 5.0    # -2 to -5 범위
-        else:
-            # 5N 이하는 페널티 없음
-            large_error_penalty = 0.0
+        # 1) 추적 보상 (0~1 범위로 정규화) - 연속적 목표 유도
+        tracking_reward = np.exp(-force_err * 1.5)  # 0~1 범위
         
-        # 3) 안정성 보상 (미분항 활용) - 진동 억제
-        error_velocity = abs(force_error_dot)
-        stability_reward = 1.5 * np.exp(-error_velocity * 2.0)
+        # 2) 안정성 보상 (0~1 범위로 정규화) - 진동 억제
+        stability_reward = np.exp(-abs(force_error_dot) * 2.0)  # 0~1 범위
         
-        # 4) 목표 도달 보너스 (더 관대하게)
+        # 3) 부드러움 보상 (0~1 범위로 정규화) - 급격한 변화 방지
+        smoothness_reward = np.exp(-residual_change * 50.0)  # 0~1 범위
+        
+        # 4) 근접 보너스 (연속적으로 개선) - 급작스러운 변화 제거
         if force_err <= 0.5:
-            proximity_bonus = 2.0 * (1 - force_err / 0.5)  # 0.5N 이내에서 선형 보너스
-        elif force_err <= 1.5:
-            proximity_bonus = 1.0 * (1 - (force_err - 0.5) / 1.0)  # 1.5N 이내 작은 보너스
+            proximity_bonus = 1.5 * (1 - force_err / 0.5)  # 0~1.5 범위
         else:
             proximity_bonus = 0.0
         
-        # 5) 부드러운 제어 보상 - 급격한 변화 방지
-        residual_change = abs(action_residual - self.prev_residual)
-        smoothness_reward = 0.3 * np.exp(-residual_change * 30.0)
+        # === 균형 잡힌 가중치 적용 ===
+        # 추적(3.0) > 안정성(1.5) > 근접(1.5) > 부드러움(0.5)
+        base_reward = (3.0 * tracking_reward + 
+                      1.5 * stability_reward + 
+                      0.5 * smoothness_reward + 
+                      proximity_bonus)
         
-        # === 기본 보상 합성 ===
-        base_reward = tracking_reward + 0.7 * stability_reward + proximity_bonus + smoothness_reward
-        
-        # === 페널티 적용 ===
-        total_reward = base_reward + large_error_penalty
-        
-        # 6) 안전성 페널티 - 단계적 선형 페널티로 개선
+        # === 개선된 안전성 페널티 (부드러운 선형) ===
         if current_force > 80.0:
-            safety_penalty = -3.0 * (current_force - 80.0) / 20.0  # 더 강한 안전 페널티
-            total_reward += safety_penalty
+            safety_penalty = -2.0 * (current_force - 80.0) / 20.0  # 선형 페널티 (-2.0~0)
+        else:
+            safety_penalty = 0.0
         
-        # 7) 효율성 페널티 - 약간 증가
-        total_reward -= 0.05 * abs(action_residual)
+        # === 정확도 페널티 (Target_force ±10N 오차 초과 시 강한 페널티) ===
+        if force_err > 10.0:
+            # 10N 초과 시 더 강한 페널티: -10.0 * (force_err - 10.0) / 10.0
+            accuracy_penalty = -10.0 * (force_err - 10.0) / 10.0  # 매우 강한 선형 페널티 (-10.0~0)
+        else:
+            accuracy_penalty = 0.0
+        
+        # === 효율성 페널티 (감소) ===
+        efficiency_penalty = -0.02 * abs(action_residual)  # 기존 -0.05 → -0.02로 완화
+        
+        total_reward = base_reward + safety_penalty + accuracy_penalty + efficiency_penalty
+        
+        # === 보상 클리핑 (학습 안정화) - 강화된 정확도 페널티 고려하여 범위 확장 ===
+        total_reward = np.clip(total_reward, -25.0, 8.0)
         
         return float(total_reward)
 
     def is_done(self, state):
-        # 🎯 오직 최대 스텝에 도달했을 때만 True (에피소드 끝까지 진행)
+        # 🎯 최대 스텝에 도달했을 때 True
         if self.episode_step >= self.max_episode_steps: 
             return True
         # 🚨 안전장치: 접촉력이 과도하게 높을 때만 종료
         if state[0] > 100.0: 
             self._log("WARNING", f"안전: 힘이 너무 높음 ({state[0]:.1f}N > 100N) - 에피소드 종료")
             return True
-        # ✅ 다른 모든 경우: 계속 진행 (목표 접촉력 달성해도 계속)
+        # 🎯 Target_force ±20N 오차 초과 시 강한 페널티와 함께 에피소드 종료
+        current_force, target_force = state[0], state[1]
+        force_error = abs(current_force - target_force)
+        if force_error > 20.0:
+            self._log("WARNING", f"정확도: 힘 오차가 너무 큼 ({force_error:.1f}N > 20N) - 에피소드 종료")
+            return True
+        # 🎯 Target achieved 조건: ±0.5N 이내에서 10초간 유지되면 에피소드 종료
+        if force_error <= self.target_achieved_threshold:
+            current_time = time.perf_counter()
+            if self.target_achieved_start_time is None:
+                self.target_achieved_start_time = current_time
+            else:
+                self.target_achieved_duration = current_time - self.target_achieved_start_time
+                if self.target_achieved_duration >= self.target_achieved_required_duration:
+                    self._log("SUCCESS", f"🎯 Target achieved 완료! ({self.target_achieved_duration:.1f}s ≥ {self.target_achieved_required_duration}s) - 에피소드 종료")
+                    return True
+        else:
+            # Target achieved 조건이 깨지면 리셋
+            if self.target_achieved_start_time is not None:
+                self.target_achieved_start_time = None
+                self.target_achieved_duration = 0.0
+        # ✅ 다른 모든 경우: 계속 진행
         return False
 
     # ---- RL activity monitor ----
@@ -814,6 +850,9 @@ class PneumaticPolishingEnvironment:
         # 마지막 유효한 상태 초기화
         self.last_valid_state = None
         self.last_sander_active = False
+        # Target achieved 추적 변수 초기화
+        self.target_achieved_start_time = None
+        self.target_achieved_duration = 0.0
         state, _ = self.comm.get_latest_state()
         if state is not None:
             self.previous_target_force = state[1]  # target_force
@@ -925,10 +964,12 @@ class PneumaticPolishingEnvironment:
                 # 기준으로 스텝 증가
                 self.episode_step += 1
                 
+                # 현재 상태에 대한 종료 조건 확인 (항상 실행)
+                done = self.is_done(state)
+                
                 # 이전 transition 처리 및 학습
                 if prev_state is not None and prev_sander_active:
                     reward = self.calculate_reward_exponential(prev_state, prev_action, prev_sander_active)
-                    done = self.is_done(state)
                     self.agent.store_transition(prev_state, prev_action, reward, state, done)
                     self.current_episode_reward += reward
                     if len(self.agent.replay) > self.cfg["REPLAY_WARMUP"]:
@@ -940,11 +981,14 @@ class PneumaticPolishingEnvironment:
                     self._log("INFO", "RL 비활성 지속으로 에피소드 종료")
                     break
                 
-                # 에피소드 종료 확인
-                if self.episode_step >= self.max_episode_steps:
+                # 에피소드 종료 확인 (is_done 결과 또는 최대 스텝 도달)
+                if done or self.episode_step >= self.max_episode_steps:
                     episode_done = True
                     rl_residual = 0.0
-                    self._log("INFO", f"🎯 에피소드 {ep+1} 종료 (단계 {self.episode_step}) - episode_done=True 전송")
+                    if done:
+                        self._log("INFO", f"🎯 에피소드 {ep+1} 종료 (조건 만족, 단계 {self.episode_step}) - episode_done=True 전송")
+                    else:
+                        self._log("INFO", f"🎯 에피소드 {ep+1} 종료 (최대 스텝 도달, 단계 {self.episode_step}) - episode_done=True 전송")
                 else:
                     episode_done = False
                     if sander_active:
@@ -1076,12 +1120,12 @@ class PneumaticPolishingEnvironment:
 def signal_handler(signum, frame):
     print(f"\n⚠️ Received signal {signum}. Shutting down gracefully...")
     
-    # 누적 보상 그래프 생성
+    # 에피소드별 보상 그래프 생성
     if 'env' in globals():
         try:
-            print("📈 누적 보상 그래프 생성 중...")
-            env.generate_cumulative_reward_graph()
-            print("✅ 누적 보상 그래프 저장 완료!")
+            print("📈 에피소드별 보상 그래프 생성 중...")
+            env.generate_episode_reward_graph()
+            print("✅ 에피소드별 보상 그래프 저장 완료!")
         except Exception as e:
             print(f"❌ 그래프 생성 실패: {e}")
     
@@ -1100,7 +1144,7 @@ if __name__ == "__main__":
     # =========================
     
     # 송신 주파수 (로봇 제어 PC로 보내는 주파수)
-    SEND_FREQUENCY_HZ = 10  # 원하는 송신 주파수 (Hz) 
+    SEND_FREQUENCY_HZ = 100  # 원하는 송신 주파수 (Hz) 
     
     # 수신 주파수 (로봇 제어 PC에서 받는 주파수)
     RECV_FREQUENCY_HZ = 1000  # 원하는 수신 주파수 (Hz) 
@@ -1124,11 +1168,11 @@ if __name__ == "__main__":
         env.run_training(config["EPISODES"])
         print("✅ Training completed successfully!")
         
-        # 정상 완료 시에도 누적 보상 그래프 생성
+        # 정상 완료 시에도 에피소드별 보상 그래프 생성
         try:
-            print("📈 누적 보상 그래프 생성 중...")
-            env.generate_cumulative_reward_graph()
-            print("✅ 누적 보상 그래프 저장 완료!")
+            print("📈 에피소드별 보상 그래프 생성 중...")
+            env.generate_episode_reward_graph()
+            print("✅ 에피소드별 보상 그래프 저장 완료!")
         except Exception as e:
             print(f"❌ 그래프 생성 실패: {e}")
             

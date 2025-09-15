@@ -104,7 +104,7 @@ struct LogData {
 struct TCPIP {
 	std::atomic<float> rl_pressure_from_server{ 0.0f };		// RL 에이전트로부터 수신된 공압 데이터
 	std::atomic<bool> is_new_message_received{ false };		// RL 에이전트로부터 새로운 메세지 수신 여부
-	std::atomic<bool> episode_state_flag{ false };		// RL 에이전트로부터 에피소드 상태 수신 여부
+	std::atomic<bool> episode_state_flag{ false };			// RL 에이전트로부터 에피소드 상태 수신 여부
 };
 
 
@@ -212,15 +212,16 @@ private:
 
 	// ===============================
 	// TCP 통신
-	TcpClient m_tcpClient;
-	TCPIP m_tcpip;										// TCP/IP 통신 관련 변수
-	CString m_tcpReceivedData;
-	std::mutex m_tcpMutex;
+	TcpClient m_tcpClient;									// TCP 클라이언트 객체
+	TCPIP m_tcpip;											// TCP/IP 통신 관련 변수
+	CString m_tcpReceivedData;								// TCP로부터 수신된 데이터 저장용 변수
+	std::mutex m_tcpMutex;									// TCP 데이터 보호용 뮤텍스
 
 	// Python으로부터 받은 값을 저장할 멤버 변수
 	std::atomic<float> m_received_RL_Pressure{ 0.0f };		// RL 잔차 압력 값 [MPa]
 	std::atomic<bool> m_received_RL_Confirm_Flag{ false };	// RL 메시지 수신 플래그
 	std::atomic<bool> m_received_RL_Episode_Flag{ false };	// RL Episode Flag
+	std::atomic<bool> m_received_RL_End_Flag{ false };		// RL End Flag (강화학습 종료 플래그)
 
 	// ===============================
 	//  쓰레드 핸들
