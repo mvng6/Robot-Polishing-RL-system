@@ -1540,7 +1540,6 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 		{
 			g_pDlg->m_tcpClient.Send(packetToSend.data(), packetToSend.size());
 		}
-
 		// =========================================================================
 		// 3. 로봇 구동제어
 		if (g_pDlg->m_flags.ftRunning.load())
