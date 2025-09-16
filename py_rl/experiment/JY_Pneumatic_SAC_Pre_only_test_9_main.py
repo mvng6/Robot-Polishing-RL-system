@@ -21,6 +21,138 @@ from datetime import datetime
 # ==== ADDED for CSV ====
 import csv  # <-- CSV 저장용 추가
 # =========================
+# UTILITIES
+# =========================
+class Logger:
+    """공통 로깅 유틸리티"""
+    @staticmethod
+    def log(level, message):
+        timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        level_icons = {"INFO": "ℹ️","SUCCESS": "✅","WARNING": "⚠️","ERROR": "❌","DEBUG": "🔍"}
+        icon = level_icons.get(level, "ℹ️")
+        print(f"[{timestamp}] {icon} {message}")
+
+class DataSaver:
+    """공통 데이터 저장 유틸리티"""
+    @staticmethod
+    def save_all_data(env, current_episode=None, force=True):
+        """모든 데이터를 저장하는 공통 함수"""
+        try:
+            # Reward breakdown flush
+            if current_episode is not None:
+                env.rlogger.flush_if_needed(current_episode, force=force, episode_rewards=env.agent.episode_rewards)
+            else:
+                env.rlogger.flush_if_needed(env.cfg["EPISODES"], force=force, episode_rewards=env.agent.episode_rewards)
+        except Exception as e:
+            Logger.log("ERROR", f"reward breakdown flush 실패: {e}")
+        
+        # 제어 성능 지표 저장
+        try:
+            Logger.log("INFO", "📊 제어 성능 지표 저장 중...")
+            env.cplogger.save_performance_summary()
+            env.cplogger.generate_plots()
+            Logger.log("INFO", "✅ 제어 성능 지표 저장 완료!")
+        except Exception as e:
+            Logger.log("ERROR", f"제어 성능 지표 저장 실패: {e}")
+        
+        # Learning Done 폴더에 파일들 복사
+        try:
+            Logger.log("INFO", "📁 Learning Done 폴더에 파일들 복사 중...")
+            env.ldlogger.copy_episode_rewards(env.agent.episode_rewards, env.rlogger.log_dir)
+            env.ldlogger.copy_reward_breakdown(env.rlogger.log_dir)
+            Logger.log("INFO", "✅ Learning Done 폴더 복사 완료!")
+        except Exception as e:
+            Logger.log("ERROR", f"Learning Done 폴더 복사 실패: {e}")
+        
+        Logger.log("INFO", "✅ 데이터 저장 완료!")
+
+# =========================
+# CONSTANTS
+# =========================
+# 상수 정의
+class Constants:
+    # =========================
+    # 네트워크 관련 상수
+    # =========================
+    DEFAULT_HIDDEN_DIM = 256          # 신경망 은닉층 크기 (Actor/Critic 공통)
+    DEFAULT_LR = 1e-3                 # 학습률 (Learning Rate) - 옵티마이저 업데이트 크기
+    DEFAULT_GAMMA = 0.99              # 할인 인수 - 미래 보상의 현재 가치 비율
+    DEFAULT_TAU = 0.005               # 소프트 업데이트 계수 - 타겟 네트워크 업데이트 속도
+    
+    # =========================
+    # 액션 관련 상수
+    # =========================
+    DEFAULT_R_MIN = -0.05             # 최소 잔여 압력 (MPa) - 공압 딜레이 고려
+    DEFAULT_R_MAX = 0.05              # 최대 잔여 압력 (MPa) - 공압 딜레이 고려
+    
+    # =========================
+    # 주파수 관련 상수
+    # =========================
+    DEFAULT_SEND_FREQ = 100           # 송신 주파수 (Hz) - 로봇 제어 PC로 명령 전송
+    DEFAULT_RECV_FREQ = 1000          # 수신 주파수 (Hz) - 로봇 제어 PC에서 상태 수신
+    DEFAULT_TICK_TOL = 0.005          # 송신 주기 허용 오차 (초) - 100Hz에서 5ms
+    
+    # =========================
+    # 학습 관련 상수
+    # =========================
+    DEFAULT_BATCH_SIZE = 128          # 배치 크기 - 한 번에 학습할 경험 개수
+    DEFAULT_REPLAY_WARMUP = 21000     # 리플레이 버퍼 워밍업 - 학습 시작 전 최소 경험 수 (30초간 데이터)
+    DEFAULT_UPDATE_FREQ = 10          # 네트워크 업데이트 주기 (Hz) - 1초에 10번 학습
+    DEFAULT_EPISODES = 250            # 총 에피소드 수 - 전체 학습 횟수
+    DEFAULT_MAX_STEPS = 3000          # 에피소드당 최대 스텝 수 - 한 에피소드 최대 길이
+    DEFAULT_HER_SAMPLES = 12          # HER 샘플 수 - 실패한 경험을 재활용하는 개수
+    
+    # =========================
+    # 네트워킹 관련 상수
+    # =========================
+    DEFAULT_HOST = "0.0.0.0"          # 서버 호스트 - 모든 IP에서 접속 허용
+    DEFAULT_PORT = 8888               # 통신 포트 번호
+    DEFAULT_RECV_TIMEOUT = 0.5        # 수신 타임아웃 (초) - 데이터 수신 대기 시간
+    DEFAULT_RECV_LOOP_TIMEOUT = 0.05  # 수신 루프 타임아웃 (초) - 내부 루프 대기 시간
+    DEFAULT_COMM_FAIL_MAX = 3         # 최대 통신 실패 횟수 - 연속 실패 시 경고
+    DEFAULT_COMM_RETRY_DELAY = 0.1    # 통신 재시도 지연 (초) - 실패 후 재시도 간격
+    
+    # =========================
+    # 메모리 관련 상수
+    # =========================
+    DEFAULT_MAX_REWARDS_HISTORY = 1000        # 최대 보상 기록 수 - 메모리 절약을 위한 제한
+    DEFAULT_REPLAY_BUFFER_SIZE = 2000000      # 리플레이 버퍼 크기 - 저장할 경험의 최대 개수
+    
+    # =========================
+    # 경로 관련 상수
+    # =========================
+    DEFAULT_MODEL_SAVE_DIR = "/home/katech/Robot-Polishing-RL-system/py_rl/saved_agents"  # 모델 저장 경로
+    DEFAULT_LOG_DIR = "/home/katech/Robot-Polishing-RL-system/py_rl/experiment_logs"      # 로그 저장 경로
+    
+    # =========================
+    # 기타 상수
+    # =========================
+    WAIT_MESSAGE_INTERVAL = 0.04      # 대기 메시지 출력 간격 (초) - 상태 표시 주기
+    DEFAULT_FORCE_VALUE = -30.0       # 기본 힘 값 (N) - 데이터 없을 때 사용
+    MAX_RETRIES = 3                   # 최대 재시도 횟수 - 일반적인 재시도 제한
+    SUCCESS_REWARD = 10.0             # 성공 보상 - 목표 달성 시 추가 보상
+    BAND_TOLERANCE = 5.0              # 밴드 허용 오차 (N) - 목표 힘 주변 허용 범위
+    
+    # =========================
+    # 보상함수 관련 상수
+    # =========================
+    # 보상 가중치 (수렴>유지>안정성 순서로 중요도)
+    REWARD_WEIGHT_PROGRESS = 2.0      # 진행도 가중치 - 목표에 가까워지는 정도
+    REWARD_WEIGHT_BAND = 0.6          # 밴드 내 유지 가중치 - 허용 범위 내에 있는 정도
+    REWARD_WEIGHT_STICK = 0.6         # 연속 밴드 유지 가중치 - 밴드 내에서 계속 유지
+    REWARD_WEIGHT_EDOT = 0.02         # 힘 변화율 페널티 가중치 - 힘의 급격한 변화 방지
+    REWARD_WEIGHT_DU = 0.04           # 액션 변화 페널티 가중치 - 액션의 급격한 변화 방지
+    
+    # 보상 범위 및 임계값
+    REWARD_MIN = -15.0                # 최소 보상값 - 보상 하한선 (안정성)
+    REWARD_MAX = 15.0                 # 최대 보상값 - 보상 상한선 (안정성)
+    TAU_REQUIRED_SECONDS = 10         # 밴드 유지 요구 시간 (초) - 성공 판정 기준
+    
+    # 밴드 관련 상수
+    BAND_TOLERANCE_N = 5.0            # 밴드 허용 오차 (N) - 목표 힘 ±5N 범위
+    BAND_SUCCESS_MESSAGE = "🎯 ±{:.1f}N 밴드 내 {:.1f}s 유지 성공"  # 성공 메시지 템플릿
+
+# =========================
 # CONFIG
 # =========================
 # 기본 설정
@@ -28,40 +160,40 @@ _BASE_CONFIG = {
     # Neural Network
     "STATE_DIM": 6,
     "ACTION_DIM": 1,
-    "HIDDEN": 256,
-    "LR": 1e-3,
-    "GAMMA": 0.99,
-    "TAU": 0.005,
+    "HIDDEN": Constants.DEFAULT_HIDDEN_DIM,
+    "LR": Constants.DEFAULT_LR,
+    "GAMMA": Constants.DEFAULT_GAMMA,
+    "TAU": Constants.DEFAULT_TAU,
     "AUTO_ENTROPY": True,
     # Residual limits (MPa) - 공압 딜레이 고려하여 범위 축소
-    "R_MIN": -0.05,
-    "R_MAX":  0.05,
+    "R_MIN": Constants.DEFAULT_R_MIN,
+    "R_MAX": Constants.DEFAULT_R_MAX,
     # Scheduling - 송신/수신 주파수 설정
-    "SEND_FREQ_HZ": 100,  # 송신 주파수 (Hz)
-    "RECV_FREQ_HZ": 1000,  # 수신 주파수 (Hz) - 로봇 제어 PC에서 받는 주파수
-    "TICK_TOL": 0.005,  # 🚀 수정: 100Hz에서 5ms 허용오차 (기존 20ms → 5ms)
+    "SEND_FREQ_HZ": Constants.DEFAULT_SEND_FREQ,  # 송신 주파수 (Hz)
+    "RECV_FREQ_HZ": Constants.DEFAULT_RECV_FREQ,  # 수신 주파수 (Hz) - 로봇 제어 PC에서 받는 주파수
+    "TICK_TOL": Constants.DEFAULT_TICK_TOL,  # 🚀 수정: 100Hz에서 5ms 허용오차 (기존 20ms → 5ms)
     # Training
-    "BATCH_SIZE": 128,
-    "REPLAY_WARMUP": 1000,
-    "UPDATE_FREQ_HZ": 10,
+    "BATCH_SIZE": Constants.DEFAULT_BATCH_SIZE,
+    "REPLAY_WARMUP": Constants.DEFAULT_REPLAY_WARMUP,
+    "UPDATE_FREQ_HZ": Constants.DEFAULT_UPDATE_FREQ,
     # Networking
-    "HOST": "0.0.0.0",
-    "PORT": 8888,
-    "RECV_TIMEOUT_SEC": 0.5,
-    "RECV_LOOP_TIMEOUT_SEC": 0.05,
-    "COMM_FAIL_MAX": 3,
-    "COMM_RETRY_DELAY": 0.1,
+    "HOST": Constants.DEFAULT_HOST,
+    "PORT": Constants.DEFAULT_PORT,
+    "RECV_TIMEOUT_SEC": Constants.DEFAULT_RECV_TIMEOUT,
+    "RECV_LOOP_TIMEOUT_SEC": Constants.DEFAULT_RECV_LOOP_TIMEOUT,
+    "COMM_FAIL_MAX": Constants.DEFAULT_COMM_FAIL_MAX,
+    "COMM_RETRY_DELAY": Constants.DEFAULT_COMM_RETRY_DELAY,
     # Episode
-    "EPISODES": 100,
-    "MAX_EPISODE_STEPS": 3000,
+    "EPISODES": Constants.DEFAULT_EPISODES,
+    "MAX_EPISODE_STEPS": Constants.DEFAULT_MAX_STEPS,
     # Model saving
-    "MODEL_SAVE_DIR": "/home/katech/Robot-Polishing-RL-system/py_rl/saved_agents",
+    "MODEL_SAVE_DIR": Constants.DEFAULT_MODEL_SAVE_DIR,
     # Logging paths
-    "LOG_DIR": "/home/katech/Robot-Polishing-RL-system/py_rl/experiment_logs",
+    "LOG_DIR": Constants.DEFAULT_LOG_DIR,
     # Memory management
-    "MAX_EPISODE_REWARDS_HISTORY": 1000,
+    "MAX_EPISODE_REWARDS_HISTORY": Constants.DEFAULT_MAX_REWARDS_HISTORY,
     # HER settings
-    "HER_SAMPLES": 4,  # HER 샘플 개수
+    "HER_SAMPLES": Constants.DEFAULT_HER_SAMPLES,  # HER 샘플 개수
 }
 
 def create_config(send_freq_hz=None, recv_freq_hz=None):
@@ -142,7 +274,7 @@ class Critic(nn.Module):
 # Replay Buffer
 # =========================    
 class ReplayBuffer:
-    def __init__(self, capacity=100000): 
+    def __init__(self, capacity=Constants.DEFAULT_REPLAY_BUFFER_SIZE):
         self.buffer = deque(maxlen=capacity)
 
     def push(self, state, action, reward, next_state, done):
@@ -157,6 +289,314 @@ class ReplayBuffer:
     
     def __len__(self):
         return len(self.buffer)
+
+# ==== ADDED: Control Performance Logger ====
+class ControlPerformanceLogger:
+    """
+    9개 핵심 제어공학 지표를 계산하고 저장하는 클래스
+    """
+    def __init__(self, log_dir):
+        self.base_log_dir = log_dir
+        # 실행별 고유 폴더 생성
+        now = datetime.now()
+        timestamp = now.strftime("%y%m%d_%Hh%Mm")
+        self.log_dir = os.path.join(log_dir, f"learning_done_{timestamp}")
+        self.control_perf_dir = os.path.join(self.log_dir, "control_performance")
+        os.makedirs(self.control_perf_dir, exist_ok=True)
+        
+        # 데이터 저장용 리스트들
+        self.time_data = []
+        self.force_data = []
+        self.target_data = []
+        self.error_data = []
+        self.control_effort_data = []
+        self.pi_output_data = []
+        
+        # 에피소드별 지표 저장
+        self.episode_metrics = []
+        
+        print(f"📁 Control Performance 저장 폴더: {self.control_perf_dir}")
+
+    def add_data_point(self, time, force, target, control_effort, pi_output):
+        """실시간 데이터 포인트 추가 (100Hz에서 호출)"""
+        self.time_data.append(time)
+        self.force_data.append(force)
+        self.target_data.append(target)
+        self.error_data.append(abs(force - target))
+        self.control_effort_data.append(control_effort)
+        self.pi_output_data.append(pi_output)
+
+    def calculate_episode_metrics(self, episode_num):
+        """에피소드별 9개 핵심 지표 계산"""
+        if not self.time_data:
+            return None
+            
+        metrics = {
+            'episode': episode_num,
+            'rmse': self._calculate_rmse(),
+            'sse': self._calculate_sse(),
+            'rise_time': self._calculate_rise_time(),
+            'settling_time': self._calculate_settling_time(),
+            'overshoot': self._calculate_overshoot(),
+            'control_effort': self._calculate_control_effort(),
+            'residual_effectiveness': self._calculate_residual_effectiveness(),
+            'pi_rl_synergy': self._calculate_pi_rl_synergy(),
+            'learning_progress': self._calculate_learning_progress()
+        }
+        
+        self.episode_metrics.append(metrics)
+        return metrics
+
+    def _calculate_rmse(self):
+        """RMSE 계산"""
+        if not self.error_data:
+            return None
+        return np.sqrt(np.mean(np.square(self.error_data)))
+
+    def _calculate_sse(self):
+        """SSE 계산 (마지막 10% 구간의 평균 오차)"""
+        if not self.error_data:
+            return None
+        last_10_percent = max(1, int(len(self.error_data) * 0.1))
+        return np.mean(self.error_data[-last_10_percent:])
+
+    def _calculate_rise_time(self):
+        """Rise Time 계산 (10% → 90%)"""
+        if not self.force_data or not self.target_data:
+            return None
+            
+        target = self.target_data[0]
+        target_10 = target * 0.1
+        target_90 = target * 0.9
+        
+        force_array = np.array(self.force_data)
+        time_array = np.array(self.time_data)
+        
+        idx_10 = np.where(force_array >= target_10)[0]
+        idx_90 = np.where(force_array >= target_90)[0]
+        
+        if len(idx_10) > 0 and len(idx_90) > 0:
+            return float(time_array[idx_90[0]] - time_array[idx_10[0]])
+        return None
+
+    def _calculate_settling_time(self):
+        """Settling Time 계산 (±5% 오차 범위)"""
+        if not self.force_data or not self.target_data:
+            return None
+            
+        target = self.target_data[0]
+        tolerance = target * 0.05
+        force_array = np.array(self.force_data)
+        time_array = np.array(self.time_data)
+        
+        settled_indices = np.where(np.abs(force_array - target) <= tolerance)[0]
+        if len(settled_indices) > 0:
+            return float(time_array[settled_indices[0]])
+        return None
+
+    def _calculate_overshoot(self):
+        """Overshoot 계산"""
+        if not self.force_data or not self.target_data:
+            return None
+            
+        target = self.target_data[0]
+        max_force = np.max(self.force_data)
+        
+        if max_force > target:
+            return float(((max_force - target) / target) * 100)
+        return 0.0
+
+    def _calculate_control_effort(self):
+        """Control Effort 계산 (RL residual의 총합)"""
+        if not self.control_effort_data:
+            return None
+        return float(np.sum(np.abs(self.control_effort_data)))
+
+    def _calculate_residual_effectiveness(self):
+        """Residual Effectiveness 계산 (RL residual과 오차의 상관계수)"""
+        if len(self.control_effort_data) < 2 or len(self.error_data) < 2:
+            return None
+        try:
+            correlation = np.corrcoef(self.control_effort_data, self.error_data)[0, 1]
+            return float(correlation) if not np.isnan(correlation) else 0.0
+        except (ValueError, np.linalg.LinAlgError, IndexError):
+            return 0.0
+
+    def _calculate_pi_rl_synergy(self):
+        """PI-RL Synergy 계산 (PI 출력과 RL residual의 상관계수)"""
+        if len(self.pi_output_data) < 2 or len(self.control_effort_data) < 2:
+            return None
+        try:
+            correlation = np.corrcoef(self.pi_output_data, self.control_effort_data)[0, 1]
+            return float(correlation) if not np.isnan(correlation) else 0.0
+        except (ValueError, np.linalg.LinAlgError, IndexError):
+            return 0.0
+
+    def _calculate_learning_progress(self):
+        """Learning Progress 계산 (에피소드별 RMSE 개선)"""
+        if len(self.episode_metrics) < 2:
+            return None
+        
+        rmse_values = [ep['rmse'] for ep in self.episode_metrics if ep['rmse'] is not None]
+        if len(rmse_values) < 2:
+            return None
+            
+        # 선형 회귀 기울기 (음수일수록 개선)
+        x = np.arange(len(rmse_values))
+        slope = np.polyfit(x, rmse_values, 1)[0]
+        return float(slope)
+
+    def save_episode_metrics(self, episode_num):
+        """에피소드별 지표를 CSV로 저장"""
+        metrics = self.calculate_episode_metrics(episode_num)
+        if metrics is None:
+            return
+            
+        # 개별 지표별 CSV 저장
+        for metric_name, value in metrics.items():
+            if metric_name == 'episode' or value is None:
+                continue
+                
+            csv_path = os.path.join(self.control_perf_dir, f"{metric_name}.csv")
+            file_exists = os.path.exists(csv_path)
+            
+            with open(csv_path, mode="a", newline="") as f:
+                writer = csv.writer(f)
+                if not file_exists:
+                    writer.writerow(["episode", metric_name])
+                writer.writerow([episode_num, value])
+
+    def save_performance_summary(self):
+        """전체 성능 요약 저장"""
+        if not self.episode_metrics:
+            return
+            
+        summary_path = os.path.join(self.control_perf_dir, "performance_summary.csv")
+        
+        with open(summary_path, mode="w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["Metric", "Mean", "Std", "Min", "Max", "Unit"])
+            
+            # 각 지표별 통계 계산
+            for metric_name in ['rmse', 'sse', 'rise_time', 'settling_time', 'overshoot', 
+                              'control_effort', 'residual_effectiveness', 'pi_rl_synergy', 'learning_progress']:
+                values = [ep[metric_name] for ep in self.episode_metrics if ep[metric_name] is not None]
+                
+                if values:
+                    writer.writerow([
+                        metric_name,
+                        f"{np.mean(values):.4f}",
+                        f"{np.std(values):.4f}",
+                        f"{np.min(values):.4f}",
+                        f"{np.max(values):.4f}",
+                        self._get_metric_unit(metric_name)
+                    ])
+
+    def _get_metric_unit(self, metric_name):
+        """지표별 단위 반환"""
+        units = {
+            'rmse': 'N',
+            'sse': 'N', 
+            'rise_time': 's',
+            'settling_time': 's',
+            'overshoot': '%',
+            'control_effort': 'MPa·s',
+            'residual_effectiveness': '-',
+            'pi_rl_synergy': '-',
+            'learning_progress': 'N/episode'
+        }
+        return units.get(metric_name, '')
+
+    def generate_plots(self):
+        """각 지표별 시각화 생성"""
+        if not self.episode_metrics:
+            return
+            
+        for metric_name in ['rmse', 'sse', 'rise_time', 'settling_time', 'overshoot', 
+                          'control_effort', 'residual_effectiveness', 'pi_rl_synergy', 'learning_progress']:
+            self._plot_metric(metric_name)
+
+    def _plot_metric(self, metric_name):
+        """개별 지표 시각화"""
+        values = [ep[metric_name] for ep in self.episode_metrics if ep[metric_name] is not None]
+        episodes = [ep['episode'] for ep in self.episode_metrics if ep[metric_name] is not None]
+        
+        if not values:
+            return
+            
+        plt.figure(figsize=(10, 6))
+        plt.plot(episodes, values, 'b-', linewidth=2, marker='o', markersize=4)
+        plt.xlabel('Episode', fontsize=12)
+        plt.ylabel(f'{metric_name.upper()}', fontsize=12)
+        plt.title(f'{metric_name.upper()} Over Episodes', fontsize=14, fontweight='bold')
+        plt.grid(True, alpha=0.3)
+        
+        # 평균선 추가
+        if len(values) > 1:
+            avg_value = np.mean(values)
+            plt.axhline(y=avg_value, color='r', linestyle='--', alpha=0.7, 
+                       label=f'Average: {avg_value:.4f}')
+            plt.legend()
+        
+        png_path = os.path.join(self.control_perf_dir, f"{metric_name}.png")
+        plt.tight_layout()
+        plt.savefig(png_path, dpi=300, bbox_inches='tight')
+        plt.close()
+
+    def reset_episode_data(self):
+        """에피소드 데이터 초기화"""
+        self.time_data.clear()
+        self.force_data.clear()
+        self.target_data.clear()
+        self.error_data.clear()
+        self.control_effort_data.clear()
+        self.pi_output_data.clear()
+
+# ==== ADDED: Learning Done Logger ====
+class LearningDoneLogger:
+    """
+    학습 완료 시 전체 로깅을 관리하는 클래스
+    """
+    def __init__(self, log_dir):
+        self.base_log_dir = log_dir
+        now = datetime.now()
+        timestamp = now.strftime("%y%m%d_%Hh%Mm")
+        self.log_dir = os.path.join(log_dir, f"learning_done_{timestamp}")
+        self.reward_breakdown_dir = os.path.join(self.log_dir, "reward_breakdown")
+        os.makedirs(self.log_dir, exist_ok=True)
+        os.makedirs(self.reward_breakdown_dir, exist_ok=True)
+        
+        print(f"📁 Learning Done 저장 폴더: {self.log_dir}")
+
+    def copy_episode_rewards(self, episode_rewards, rlogger_dir):
+        """episode_rewards 파일들을 learning_done 폴더로 복사"""
+        # CSV 복사
+        src_csv = os.path.join(rlogger_dir, "episode_rewards.csv")
+        dst_csv = os.path.join(self.log_dir, "episode_rewards.csv")
+        if os.path.exists(src_csv):
+            import shutil
+            shutil.copy2(src_csv, dst_csv)
+        
+        # PNG 복사
+        src_png = os.path.join(rlogger_dir, "episode_rewards.png")
+        dst_png = os.path.join(self.log_dir, "episode_rewards.png")
+        if os.path.exists(src_png):
+            import shutil
+            shutil.copy2(src_png, dst_png)
+
+    def copy_reward_breakdown(self, rlogger_dir):
+        """reward_breakdown 파일들을 learning_done/reward_breakdown 폴더로 복사"""
+        import shutil
+        import glob
+        
+        # reward_breakdown 관련 파일들 찾기
+        pattern = os.path.join(rlogger_dir, "reward_breakdown*")
+        files = glob.glob(pattern)
+        
+        for src_file in files:
+            filename = os.path.basename(src_file)
+            dst_file = os.path.join(self.reward_breakdown_dir, filename)
+            shutil.copy2(src_file, dst_file)
 
 # ==== ADDED: Reward Breakdown Logger ====
 class RewardBreakdownLogger:
@@ -233,6 +673,21 @@ class RewardBreakdownLogger:
             if not file_exists:
                 writer.writeheader()
             writer.writerows(self.rows)
+
+    def save_reward_breakdown_csv(self):
+        """reward_breakdown 데이터를 CSV로 저장"""
+        if not self.rows:
+            return
+            
+        csv_path = os.path.join(self.log_dir, "reward_breakdown.csv")
+        with open(csv_path, mode="w", newline="") as f:
+            writer = csv.DictWriter(
+                f,
+                fieldnames=["episode","step","prog","in_band_now","edot_abs","du_abs","reward","is_her"]
+            )
+            writer.writeheader()
+            writer.writerows(self.rows)
+        print(f"   📊 CSV: reward_breakdown.csv")
 
     def _plot_png(self, start_ep, end_ep):
         # start_ep~end_ep 사이의 데이터만 사용
@@ -315,6 +770,9 @@ class RewardBreakdownLogger:
             
         # CSV Append
         self._write_csv_append()
+        
+        # ==== ADDED: reward_breakdown CSV 저장 ====
+        self.save_reward_breakdown_csv()
         
         # 에피소드별 보상 저장 (제공된 경우)
         if episode_rewards is not None:
@@ -469,10 +927,7 @@ class ResidualRLCommunicator:
         self.old_data_warning_logged = False  # 오래된 데이터 경고 중복 방지
 
     def _log(self, level, message):
-        timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-        level_icons = {"INFO": "ℹ️","SUCCESS": "✅","WARNING": "⚠️","ERROR": "❌","DEBUG": "🔍"}
-        icon = level_icons.get(level, "ℹ️")
-        print(f"[{timestamp}] {icon} {message}")
+        Logger.log(level, message)
 
     def connect(self):
         try:
@@ -727,19 +1182,19 @@ class PneumaticPolishingEnvironment:
         self.episode_end_confirmed = False       # 에피소드 종료 확인됨
         
         # --- HER Reward 전용 변수 ---
-        self.band_tol_N = 5.0
-        self.tau_req_s = 10
+        self.band_tol_N = Constants.BAND_TOLERANCE_N
+        self.tau_req_s = Constants.TAU_REQUIRED_SECONDS
         self.tau_req_steps = int(self.tau_req_s * self.cfg["SEND_FREQ_HZ"])
         self.band_timer = 0
         self._last_e = None
 
         # reward weights (수렴>유지>안정성)
-        self.w_prog = 2.0
-        self.w_band = 0.6
-        self.w_stick = 0.6
-        self.w_edot = 0.02
-        self.w_du = 0.04
-        self.R_success = 12.0
+        self.w_prog = Constants.REWARD_WEIGHT_PROGRESS
+        self.w_band = Constants.REWARD_WEIGHT_BAND
+        self.w_stick = Constants.REWARD_WEIGHT_STICK
+        self.w_edot = Constants.REWARD_WEIGHT_EDOT
+        self.w_du = Constants.REWARD_WEIGHT_DU
+        self.R_success = Constants.SUCCESS_REWARD
 
         # HER 전용 상태 변수 (원래 보상과 독립적으로 계산)
         self._last_e_her = None
@@ -752,11 +1207,14 @@ class PneumaticPolishingEnvironment:
         # ==== ADDED: reward breakdown logger ====
         self.rlogger = RewardBreakdownLogger(self.cfg["LOG_DIR"])
         
+        # ==== ADDED: control performance logger ====
+        self.cplogger = ControlPerformanceLogger(self.cfg["LOG_DIR"])
+        
+        # ==== ADDED: learning done logger ====
+        self.ldlogger = LearningDoneLogger(self.cfg["LOG_DIR"])
+        
     def _log(self, level, message):
-        timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-        level_icons = {"INFO": "ℹ️","SUCCESS": "✅","WARNING": "⚠️","ERROR": "❌","DEBUG": "🔍"}
-        icon = level_icons.get(level, "ℹ️")
-        print(f"[{timestamp}] {icon} {message}")
+        Logger.log(level, message)
 
     def generate_episode_reward_graph(self, save_to_rlogger_folder=True):
         if not hasattr(self, 'agent') or not self.agent.episode_rewards:
@@ -837,7 +1295,7 @@ class PneumaticPolishingEnvironment:
         if terminal_success:
             R += self.R_success
 
-        R = float(np.clip(R, -15.0, 15.0))
+        R = float(np.clip(R, Constants.REWARD_MIN, Constants.REWARD_MAX))
 
         if return_components:
             return R, {
@@ -878,7 +1336,7 @@ class PneumaticPolishingEnvironment:
         if terminal_success:
             R += self.R_success
 
-        R = float(np.clip(R, -15.0, 15.0))
+        R = float(np.clip(R, Constants.REWARD_MIN, Constants.REWARD_MAX))
 
         if return_components:
             return R, {
@@ -897,7 +1355,7 @@ class PneumaticPolishingEnvironment:
             return True, False
         self._update_band_timer(state)
         if self.band_timer >= self.tau_req_steps:
-            self._log("SUCCESS", f"🎯 ±{self.band_tol_N:.1f}N 밴드 내 {self.tau_req_s:.1f}s 유지 성공")
+            self._log("SUCCESS", Constants.BAND_SUCCESS_MESSAGE.format(self.band_tol_N, self.tau_req_s))
             return True, True
         return False, False
 
@@ -1022,8 +1480,8 @@ class PneumaticPolishingEnvironment:
             if state is not None:
                 current_force = state[0]
                 target_force = state[1]
-                print(f"⏳ Waiting... Current Force: {current_force:.1f}N, Target: {target_force:.1f}N", end='\r')
-            time.sleep(0.04)
+                Logger.log("INFO", f"⏳ Waiting... Current Force: {current_force:.1f}N, Target: {target_force:.1f}N")
+            time.sleep(Constants.WAIT_MESSAGE_INTERVAL)
             if time.perf_counter() - wait_start_time > 300:
                 self._log("WARNING", "\n⚠️ RL 활성화 타임아웃 (5분)")
                 return
@@ -1091,7 +1549,7 @@ class PneumaticPolishingEnvironment:
                             sander_active = self.last_sander_active
                             self._log("DEBUG", f"데이터 없음 - 이전 상태 사용 (step {self.episode_step})")
                         else:
-                            state = np.array([0.0, -30.0, -30.0, 0.0, 0.0, 0.0], dtype=np.float32)
+                            state = np.array([0.0, Constants.DEFAULT_FORCE_VALUE, Constants.DEFAULT_FORCE_VALUE, 0.0, 0.0, 0.0], dtype=np.float32)
                             sander_active = False
                             self._log("DEBUG", f"데이터 없음 - 기본값 사용 (step {self.episode_step})")
                         
@@ -1108,6 +1566,17 @@ class PneumaticPolishingEnvironment:
 
                 self.episode_step += 1
                 done, success = self.is_done(state)
+                
+                # ==== ADDED: 실시간 제어 지표 데이터 수집 ====
+                if state is not None:
+                    current_time = time.perf_counter() - episode_start_time
+                    self.cplogger.add_data_point(
+                        time=current_time,
+                        force=state[0],
+                        target=state[1],
+                        control_effort=abs(rl_residual) if 'rl_residual' in locals() else 0.0,
+                        pi_output=state[5]
+                    )
                 
                 # ==== CHANGED: 보상 계산 + 로깅 + HER 저장 ====
                 if prev_state is not None and prev_sander_active:
@@ -1281,6 +1750,10 @@ class PneumaticPolishingEnvironment:
             episode_stats.append(episode_stat)
             self.agent.episode_rewards.append(self.current_episode_reward)
             
+            # ==== ADDED: 에피소드별 제어 지표 저장 ====
+            self.cplogger.save_episode_metrics(ep + 1)
+            self.cplogger.reset_episode_data()  # 다음 에피소드를 위해 데이터 초기화
+            
             # ==== ADDED: 에피소드 종료 후 로봇 리셋 대기 ====
             # 모든 에피소드 완료 시 다음 에피소드 시작 대기 플래그 설정
             self._log("INFO", "🔄 로봇이 z축으로 이동하여 공압 툴 환경을 리셋하는 중...")
@@ -1295,13 +1768,6 @@ class PneumaticPolishingEnvironment:
                 self.best_episode_reward = self.current_episode_reward
                 self.best_agent_episode = ep
                 self.agent.save_model(f"{self.cfg['MODEL_SAVE_DIR']}/test_best_agent_episode_{ep+1}_reward_{self.best_episode_reward:.2f}.pth")
-
-            if (ep + 1) % 10 == 0:
-                recent_10 = self.agent.episode_rewards[-10:]
-                best_recent_reward = max(recent_10)
-                best_recent_episode = recent_10.index(best_recent_reward) + (ep + 1) - 9
-                self.agent.save_model(f"{self.cfg['MODEL_SAVE_DIR']}/test_best_10ep_ep{best_recent_episode}_reward_{best_recent_reward:.2f}.pth")
-                self._log("INFO", f"📈 최근 10 에피소드 최고 성능 저장: 에피소드 {best_recent_episode}, 보상 {best_recent_reward:.2f}")
 
             if (ep + 1) % 10 == 0:
                 self._log("INFO", f"\n🎯 === 에피소드 {ep+1}/10 완료 ===")
@@ -1326,13 +1792,8 @@ class PneumaticPolishingEnvironment:
             # ==== REMOVED: 50 에피소드마다 자동 저장 제거 ====
             # self.rlogger.flush_if_needed(ep + 1)  # Ctrl+C나 완료 시에만 저장
 
-        # ==== ADDED: 강화학습 완료 시 최종 저장 ====
-        try:
-            self._log("INFO", "📊 Reward breakdown 데이터 최종 저장 중...")
-            self.rlogger.flush_if_needed(episodes, force=True, episode_rewards=self.agent.episode_rewards)
-            self._log("INFO", "✅ Reward breakdown 저장 완료!")
-        except Exception as e:
-            self._log("ERROR", f"Reward breakdown 저장 실패: {e}")
+        # ==== ADDED: 모든 데이터 최종 저장 ====
+        DataSaver.save_all_data(self, episodes, force=True)
         
 
         self._log("INFO", "\n🎯 최적화된 학습 완료!")
@@ -1382,12 +1843,30 @@ def signal_handler(signum, frame):
                 current_episode = len(env.agent.episode_rewards)
                 env.rlogger.flush_if_needed(current_episode, force=True, episode_rewards=env.agent.episode_rewards)
             except Exception as e:
-                print(f"⚠️ reward breakdown flush 실패: {e}")
+                Logger.log("ERROR", f"reward breakdown flush 실패: {e}")
+            
+            # ==== ADDED: 제어 성능 지표 저장 ====
+            try:
+                print("📊 제어 성능 지표 저장 중...")
+                env.cplogger.save_performance_summary()
+                env.cplogger.generate_plots()
+                print("✅ 제어 성능 지표 저장 완료!")
+            except Exception as e:
+                print(f"⚠️ 제어 성능 지표 저장 실패: {e}")
+            
+            # ==== ADDED: Learning Done 폴더에 파일들 복사 ====
+            try:
+                print("📁 Learning Done 폴더에 파일들 복사 중...")
+                env.ldlogger.copy_episode_rewards(env.agent.episode_rewards, env.rlogger.log_dir)
+                env.ldlogger.copy_reward_breakdown(env.rlogger.log_dir)
+                print("✅ Learning Done 폴더 복사 완료!")
+            except Exception as e:
+                print(f"⚠️ Learning Done 폴더 복사 실패: {e}")
             
             
-            print("✅ 데이터 저장 완료!")
+            Logger.log("INFO", "✅ 데이터 저장 완료!")
         except Exception as e:
-            print(f"❌ 데이터 저장 실패: {e}")
+            Logger.log("ERROR", f"❌ 데이터 저장 실패: {e}")
     sys.exit(0)
 
 # =========================
@@ -1417,12 +1896,14 @@ if __name__ == "__main__":
             try:
                 env.rlogger.flush_if_needed(config["EPISODES"], force=True, episode_rewards=env.agent.episode_rewards)
             except Exception as e:
-                print(f"⚠️ reward breakdown flush 실패: {e}")
-            print("✅ 데이터 저장 완료!")
+                Logger.log("ERROR", f"reward breakdown flush 실패: {e}")
+            
+            # ==== ADDED: 모든 데이터 저장 ====
+            DataSaver.save_all_data(env)
         except Exception as e:
-            print(f"❌ 데이터 저장 실패: {e}")
+            Logger.log("ERROR", f"❌ 데이터 저장 실패: {e}")
     except KeyboardInterrupt:
-        print("\n⚠️ Interrupted by user.")
+        Logger.log("WARNING", "Interrupted by user.")
         # ==== ADDED: KeyboardInterrupt 시 learning_done=True 전송 ====
         try:
             print("📡 강화학습 중단 신호 전송 중...")
@@ -1433,6 +1914,10 @@ if __name__ == "__main__":
                 print("⚠️ 강화학습 중단 신호 전송 실패")
         except Exception as e:
             print(f"⚠️ 강화학습 중단 신호 전송 오류: {e}")
+        
+        # ==== ADDED: 모든 데이터 저장 ====
+        DataSaver.save_all_data(env)
+        
         env.comm.close()
     except Exception as e:
         print(f"\n❌ Training failed with error: {e}")
@@ -1446,6 +1931,10 @@ if __name__ == "__main__":
                 print("⚠️ 강화학습 오류 종료 신호 전송 실패")
         except Exception as e2:
             print(f"⚠️ 강화학습 오류 종료 신호 전송 오류: {e2}")
+        
+        # ==== ADDED: 모든 데이터 저장 ====
+        DataSaver.save_all_data(env)
+        
         env.comm.close()
     finally:
-        print("🔚 Training program terminated.")
+        Logger.log("INFO", "🔚 Training program terminated.")
