@@ -96,7 +96,7 @@ class Constants:
     # 학습 관련 상수
     # =========================
     DEFAULT_BATCH_SIZE = 128          # 배치 크기 - 한 번에 학습할 경험 개수
-    DEFAULT_REPLAY_WARMUP = 21000     # 리플레이 버퍼 워밍업 - 학습 시작 전 최소 경험 수 (30초간 데이터)
+    DEFAULT_REPLAY_WARMUP = 10000     # 리플레이 버퍼 워밍업 - 학습 시작 전 최소 경험 수 (30초간 데이터)
     DEFAULT_UPDATE_FREQ = 10          # 네트워크 업데이트 주기 (Hz) - 1초에 10번 학습
     DEFAULT_EPISODES = 250            # 총 에피소드 수 - 전체 학습 횟수
     DEFAULT_MAX_STEPS = 3000          # 에피소드당 최대 스텝 수 - 한 에피소드 최대 길이
@@ -1476,11 +1476,17 @@ class PneumaticPolishingEnvironment:
             if sander_active:
                 wait_duration = time.perf_counter() - wait_start_time
                 self._log("INFO", f"🎯 RL 활성화! ({wait_duration:.1f}s 대기)")
+                # 대기 메시지 플래그 리셋 (다음 대기 시 다시 출력 가능하도록)
+                if hasattr(self, '_waiting_message_shown'):
+                    delattr(self, '_waiting_message_shown')
                 break
             if state is not None:
                 current_force = state[0]
                 target_force = state[1]
-                Logger.log("INFO", f"⏳ Waiting... Current Force: {current_force:.1f}N, Target: {target_force:.1f}N")
+                # 대기 메시지를 한 번만 출력하도록 수정
+                if not hasattr(self, '_waiting_message_shown'):
+                    Logger.log("INFO", f"⏳ Waiting... Current Force: {current_force:.1f}N, Target: {target_force:.1f}N")
+                    self._waiting_message_shown = True
             time.sleep(Constants.WAIT_MESSAGE_INTERVAL)
             if time.perf_counter() - wait_start_time > 300:
                 self._log("WARNING", "\n⚠️ RL 활성화 타임아웃 (5분)")
@@ -1499,7 +1505,9 @@ class PneumaticPolishingEnvironment:
                     
                     # ==== ADDED: 대기 중 상태를 1번만 표시 ====
                     if state is not None and not waiting_message_shown and not sander_active:
-                        self._log("INFO", "⏳ 로봇 z축 이동 중... sander_active=0 대기 중")
+                        current_force = state[0]
+                        target_force = state[1]
+                        self._log("INFO", f"⏳ 로봇 z축 이동 중... sander_active=0 대기 중 (Current Force: {current_force:.1f}N, Target: {target_force:.1f}N)")
                         waiting_message_shown = True
                     
                     if sander_active and self.waiting_for_episode_start:
