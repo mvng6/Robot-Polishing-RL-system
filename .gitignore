@@ -420,3 +420,6 @@ FodyWeavers.xsd
 
 # RL 실험 로그 무시
 py_rl/experiment_logs/
+
+# RL 실험 중 저장된 에이전트 무시
+py_rl/saved_agents/
