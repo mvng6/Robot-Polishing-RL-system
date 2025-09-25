@@ -1,5 +1,5 @@
-# Residual SAC Agent for Pneumatic Polishing System
-# A안: 프레임 스태킹 방식(과거 state/action을 입력에 결합), MLP 유지
+# Recurrent SAC Agent for Pneumatic Polishing System
+# B안: RNN 기반 SAC (LSTM/GRU) + 시퀀스 리플레이 버퍼
 
 import os
 import random
@@ -15,6 +15,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+import psutil  # 시스템 모니터링용
 import matplotlib
 matplotlib.use('Agg')  # 백엔드를 Agg로 변경 (GUI 불필요)
 import matplotlib.pyplot as plt
@@ -98,7 +99,7 @@ class Constants:
     # =========================
     # 네트워크 관련 상수
     # =========================
-    DEFAULT_HIDDEN_DIM = 256          # 신경망 은닉층 크기 (Actor/Critic 공통)
+    DEFAULT_HIDDEN_DIM = 512          # 신경망 은닉층 크기 (Actor/Critic 공통) - RTX 5090 최적화
     DEFAULT_LR = 1e-3                 # 학습률 (Learning Rate) - 옵티마이저 업데이트 크기
     DEFAULT_GAMMA = 0.99              # 할인 인수 - 미래 보상의 현재 가치 비율
     DEFAULT_TAU = 0.005               # 소프트 업데이트 계수 - 타겟 네트워크 업데이트 속도
@@ -119,12 +120,12 @@ class Constants:
     # =========================
     # 학습 관련 상수
     # =========================
-    DEFAULT_BATCH_SIZE = 128          # 배치 크기 - 한 번에 학습할 경험 개수
+    DEFAULT_BATCH_SIZE = 64           # 배치 크기 - 한 번에 학습할 경험 개수 (RTX 5090 최적화)
     DEFAULT_REPLAY_WARMUP = 10000     # 리플레이 버퍼 워밍업 - 학습 시작 전 최소 경험 수 (30초간 데이터)
     DEFAULT_UPDATE_FREQ = 10          # 네트워크 업데이트 주기 (Hz) - 1초에 10번 학습
     DEFAULT_EPISODES = 250            # 총 에피소드 수 - 전체 학습 횟수
     DEFAULT_MAX_STEPS = 3000          # 에피소드당 최대 스텝 수 - 한 에피소드 최대 길이 (기본값, A안에서는 6000 사용)
-    DEFAULT_HER_SAMPLES = 12          # HER 샘플 수 - 실패한 경험을 재활용하는 개수
+    DEFAULT_HER_SAMPLES = 0           # HER 샘플 수 - 임시 비활성화 (안정화 우선)
     
     # =========================
     # 네트워킹 관련 상수
@@ -140,7 +141,7 @@ class Constants:
     # 메모리 관련 상수
     # =========================
     DEFAULT_MAX_REWARDS_HISTORY = 1000        # 최대 보상 기록 수 - 메모리 절약을 위한 제한
-    DEFAULT_REPLAY_BUFFER_SIZE = 2000000      # 리플레이 버퍼 크기 - 저장할 경험의 최대 개수
+    DEFAULT_REPLAY_BUFFER_SIZE = 100000       # 리플레이 버퍼 크기 - 저장할 경험의 최대 개수 (RTX 5090 최적화)
     
     # =========================
     # 경로 관련 상수
@@ -149,10 +150,8 @@ class Constants:
     DEFAULT_LOG_DIR = "/home/katech/Robot-Polishing-RL-system/py_rl/experiment_logs"      # 로그 저장 경로
     
     # =========================
-    # A안: 프레임 스태킹 관련 상수
+    # B안: RNN 관련 상수
     # =========================
-    DEFAULT_STACK_K_STATE = 8         # 과거 state 스택 크기 (100Hz 기준 0.08초)
-    DEFAULT_STACK_K_ACTION = 8        # 과거 action 스택 크기 (100Hz 기준 0.08초)
     DEFAULT_ACTION_SMOOTH_BETA = 0.3  # 액션 스무딩 계수 (0.0=비활성, 0.3=적당)
     DEFAULT_MAX_EPISODE_STEPS = 6000  # 에피소드당 최대 스텝 수 (60초)
     
@@ -189,17 +188,24 @@ class Constants:
 # =========================
 # 기본 설정
 _BASE_CONFIG = {
-    # Neural Network (A안: 스태킹으로 인한 차원 증가)
-    "STATE_DIM": 6,  # 원본 state 차원 (스태킹 후에는 6*STACK_K_STATE + STACK_K_ACTION)
+    # Neural Network (B안: RNN 기반, 원본 state 차원 유지)
+    "STATE_DIM": 6,  # 원본 state 차원 (RNN이 시계열 처리)
     "ACTION_DIM": 1,
     "HIDDEN": Constants.DEFAULT_HIDDEN_DIM,
     "LR": Constants.DEFAULT_LR,
     "GAMMA": Constants.DEFAULT_GAMMA,
     "TAU": Constants.DEFAULT_TAU,
     "AUTO_ENTROPY": True,
-    # A안: 프레임 스태킹 설정
-    "STACK_K_STATE": Constants.DEFAULT_STACK_K_STATE,      # 과거 state 스택 크기
-    "STACK_K_ACTION": Constants.DEFAULT_STACK_K_ACTION,    # 과거 action 스택 크기
+    # B안: RNN 설정 (RTX 5090 최적화)
+    "RNN_TYPE": "LSTM",                    # RNN 타입: "LSTM" 또는 "GRU"
+    "RNN_HIDDEN": 256,                     # RNN 은닉 상태 크기 (RTX 5090용 증가)
+    "RNN_LAYERS": 2,                       # RNN 레이어 수 (깊은 네트워크)
+    "SEQ_LEN": 384,                        # 시퀀스 길이 (60초 맥락용 최적화)
+    "BURN_IN": 128,                        # 워밍업 길이 (긴 과거 맥락용)
+    # B안: RNN 사용으로 스택 설정 불필요 (호환성을 위해 유지)
+    "STACK_K_STATE": 1,                    # B안에서는 사용하지 않음
+    "STACK_K_ACTION": 1,                   # B안에서는 사용하지 않음
+    "REPLAY_BUFFER_SIZE": Constants.DEFAULT_REPLAY_BUFFER_SIZE,  # 전이 수 기준 버퍼 크기
     "ACTION_SMOOTH_BETA": Constants.DEFAULT_ACTION_SMOOTH_BETA,  # 액션 스무딩 계수
     # Residual limits (MPa) - 공압 딜레이 고려하여 범위 축소
     "R_MIN": Constants.DEFAULT_R_MIN,
@@ -219,9 +225,9 @@ _BASE_CONFIG = {
     "RECV_LOOP_TIMEOUT_SEC": Constants.DEFAULT_RECV_LOOP_TIMEOUT,
     "COMM_FAIL_MAX": Constants.DEFAULT_COMM_FAIL_MAX,
     "COMM_RETRY_DELAY": Constants.DEFAULT_COMM_RETRY_DELAY,
-    # Episode (A안: 더 긴 에피소드로 relaxation 관찰)
+    # Episode (B안: RNN 학습을 위한 충분한 길이)
     "EPISODES": Constants.DEFAULT_EPISODES,
-    "MAX_EPISODE_STEPS": Constants.DEFAULT_MAX_EPISODE_STEPS,  # A안: 6000 스텝 (60초)
+    "MAX_EPISODE_STEPS": Constants.DEFAULT_MAX_EPISODE_STEPS,  # B안: 6000 스텝 (60초)
     # Model saving
     "MODEL_SAVE_DIR": Constants.DEFAULT_MODEL_SAVE_DIR,
     # Logging paths
@@ -252,8 +258,7 @@ def create_config(send_freq_hz=None, recv_freq_hz=None):
     config["TICK_SEC"] = 1.0 / config["SEND_FREQ_HZ"]
     config["RECV_INTERVAL_SEC"] = 1.0 / config["RECV_FREQ_HZ"]
     
-    # A안: 스태킹으로 인한 STATE_DIM 재계산
-    config["STATE_DIM"] = 6 * config["STACK_K_STATE"] + config["STACK_K_ACTION"]
+    # B안: RNN 사용으로 원본 STATE_DIM 유지 (6차원)
     
     # CONFIG 검증
     _validate_config(config)
@@ -262,34 +267,127 @@ def create_config(send_freq_hz=None, recv_freq_hz=None):
 
 def _validate_config(config):
     """CONFIG 설정값 검증"""
-    # 스택 크기 검증
-    if config["STACK_K_STATE"] <= 0 or config["STACK_K_STATE"] > 20:
-        raise ValueError(f"STACK_K_STATE는 1과 20 사이여야 합니다: {config['STACK_K_STATE']}")
-    
-    if config["STACK_K_ACTION"] <= 0 or config["STACK_K_ACTION"] > 20:
-        raise ValueError(f"STACK_K_ACTION는 1과 20 사이여야 합니다: {config['STACK_K_ACTION']}")
+    # RNN 하이퍼파라미터 검증 (B안)
+    if config["RNN_HIDDEN"] <= 0:
+        raise ValueError(f"RNN 은닉 크기는 양수여야 합니다: {config['RNN_HIDDEN']}")
+    if config["RNN_LAYERS"] <= 0:
+        raise ValueError(f"RNN 레이어 수는 양수여야 합니다: {config['RNN_LAYERS']}")
+    if config["SEQ_LEN"] <= 0:
+        raise ValueError(f"시퀀스 길이는 양수여야 합니다: {config['SEQ_LEN']}")
+    if config["BURN_IN"] < 0 or config["BURN_IN"] >= config["SEQ_LEN"]:
+        raise ValueError(f"워밍업 길이는 0 이상 시퀀스 길이 미만이어야 합니다: {config['BURN_IN']} < {config['SEQ_LEN']}")
     
     # 액션 스무딩 계수 검증
     if not 0.0 <= config["ACTION_SMOOTH_BETA"] <= 1.0:
         raise ValueError(f"ACTION_SMOOTH_BETA는 0.0과 1.0 사이여야 합니다: {config['ACTION_SMOOTH_BETA']}")
     
-    # STATE_DIM 검증
-    expected_state_dim = 6 * config["STACK_K_STATE"] + config["STACK_K_ACTION"]
-    if config["STATE_DIM"] != expected_state_dim:
-        raise ValueError(f"STATE_DIM 계산 오류: {config['STATE_DIM']} != {expected_state_dim}")
+    # B안: 원본 상태 차원 검증
+    if config["STATE_DIM"] != 6:
+        raise ValueError(f"B안에서는 STATE_DIM이 6이어야 합니다: {config['STATE_DIM']}")
     
     # 에피소드 길이 검증
     if config["MAX_EPISODE_STEPS"] <= 0:
         raise ValueError(f"MAX_EPISODE_STEPS는 양수여야 합니다: {config['MAX_EPISODE_STEPS']}")
     
-    Logger.log("INFO", f"✅ CONFIG 검증 완료: STATE_DIM={config['STATE_DIM']}, 스택=({config['STACK_K_STATE']},{config['STACK_K_ACTION']})")
+    Logger.log("INFO", f"✅ CONFIG 검증 완료: STATE_DIM={config['STATE_DIM']}, RNN=({config['RNN_TYPE']},{config['RNN_HIDDEN']},{config['RNN_LAYERS']})")
 
 # 기본 CONFIG 생성
 CONFIG = create_config()
 
 # =========================
+# Weight Initialization
+# =========================
+def _orthogonal_init(m):
+    """RNN과 Linear 레이어의 가중치를 orthogonal로 초기화 (장기 의존성 보존)"""
+    if isinstance(m, (nn.Linear,)):
+        nn.init.orthogonal_(m.weight)
+        if m.bias is not None:
+            nn.init.zeros_(m.bias)
+    elif isinstance(m, (nn.GRU, nn.LSTM)):
+        for name, param in m.named_parameters():
+            if "weight_ih" in name or "weight_hh" in name:
+                nn.init.orthogonal_(param)
+            elif "bias" in name:
+                nn.init.zeros_(param)
+
+# =========================
 # SAC Models
 # =========================
+class RecurrentActor(nn.Module):
+    """
+    B안: RNN 기반 Actor 네트워크
+    
+    LSTM/GRU를 사용하여 시계열 상태를 처리하고 액션을 출력합니다.
+    공압 시스템의 relaxation 특성을 학습하기 위해 장기 의존성을 모델링합니다.
+    
+    Architecture:
+    - RNN Layer (LSTM/GRU): 시계열 상태 처리
+    - MLP Heads: 액션 평균 및 로그 표준편차 출력
+    - Tanh Squashing: 액션을 [-1, 1] 범위로 제한
+    """
+    def __init__(self, state_dim, action_dim, rnn_type="LSTM", rnn_hidden=128, rnn_layers=1, 
+                 hidden_dim=256, log_std_min=-20, log_std_max=2):
+        super().__init__()
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        self.rnn_hidden = rnn_hidden
+        self.rnn_layers = rnn_layers
+        self.log_std_min = log_std_min
+        self.log_std_max = log_std_max
+        
+        # RNN 레이어
+        if rnn_type.upper() == "LSTM":
+            self.rnn = nn.LSTM(state_dim, rnn_hidden, rnn_layers, batch_first=True)
+        elif rnn_type.upper() == "GRU":
+            self.rnn = nn.GRU(state_dim, rnn_hidden, rnn_layers, batch_first=True)
+        else:
+            raise ValueError(f"지원하지 않는 RNN 타입: {rnn_type}")
+        
+        # 출력 헤드
+        self.fc1 = nn.Linear(rnn_hidden, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.mean_head = nn.Linear(hidden_dim, action_dim)
+        self.log_std_head = nn.Linear(hidden_dim, action_dim)
+        
+    def forward(self, states, hidden=None):
+        """
+        Args:
+            states: (B, T, D) 또는 (1, 1, D) 형태의 상태 시퀀스
+            hidden: RNN 은닉 상태 (h_0, c_0) for LSTM or h_0 for GRU
+        
+        Returns:
+            mean: (B, T, action_dim) 액션 평균
+            log_std: (B, T, action_dim) 액션 로그 표준편차
+            hidden: 업데이트된 RNN 은닉 상태
+        """
+        # RNN 처리
+        rnn_out, hidden = self.rnn(states, hidden)
+        
+        # 각 타임스텝에 대해 액션 출력 (최적화된 버전)
+        B, T, _ = rnn_out.shape
+        
+        # 배치 차원을 유지하면서 처리
+        x = F.relu(self.fc1(rnn_out))  # (B, T, hidden_dim)
+        x = F.relu(self.fc2(x))        # (B, T, hidden_dim)
+        mean = self.mean_head(x)       # (B, T, action_dim)
+        log_std = torch.clamp(self.log_std_head(x), self.log_std_min, self.log_std_max)
+        
+        return mean, log_std, hidden
+    
+    def init_hidden(self, batch_size=1, device=None):
+        """은닉 상태 초기화"""
+        if device is None:
+            device = next(self.parameters()).device
+        
+        if isinstance(self.rnn, nn.LSTM):
+            h_0 = torch.zeros(self.rnn_layers, batch_size, self.rnn_hidden, device=device)
+            c_0 = torch.zeros(self.rnn_layers, batch_size, self.rnn_hidden, device=device)
+            return (h_0, c_0)
+        else:  # GRU
+            h_0 = torch.zeros(self.rnn_layers, batch_size, self.rnn_hidden, device=device)
+            return h_0
+
+# 기존 Actor는 B안에서 사용하지 않음 (호환성 유지)
 class Actor(nn.Module):
     def __init__(self, state_dim, action_dim, hidden_dim=256, log_std_min=-20, log_std_max=2):
         super().__init__()
@@ -317,6 +415,100 @@ class Actor(nn.Module):
         log_prob_sum = log_prob.sum(1, keepdim=True)
         return action, log_prob_sum
     
+class RecurrentCritic(nn.Module):
+    """
+    B안: RNN 기반 Critic (LSTM/GRU)
+    시퀀스 입력을 처리하여 각 타임스텝의 Q값을 출력 (Q1, Q2)
+    """
+    def __init__(self, state_dim, action_dim, rnn_type="LSTM", rnn_hidden=128, rnn_layers=1, 
+                 hidden_dim=256):
+        super().__init__()
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        self.rnn_hidden = rnn_hidden
+        self.rnn_layers = rnn_layers
+        
+        # Q1 네트워크
+        if rnn_type.upper() == "LSTM":
+            self.q1_rnn = nn.LSTM(state_dim + action_dim, rnn_hidden, rnn_layers, batch_first=True)
+        elif rnn_type.upper() == "GRU":
+            self.q1_rnn = nn.GRU(state_dim + action_dim, rnn_hidden, rnn_layers, batch_first=True)
+        else:
+            raise ValueError(f"지원하지 않는 RNN 타입: {rnn_type}")
+        
+        self.q1_fc1 = nn.Linear(rnn_hidden, hidden_dim)
+        self.q1_fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.q1_fc3 = nn.Linear(hidden_dim, 1)
+        
+        # Q2 네트워크
+        if rnn_type.upper() == "LSTM":
+            self.q2_rnn = nn.LSTM(state_dim + action_dim, rnn_hidden, rnn_layers, batch_first=True)
+        elif rnn_type.upper() == "GRU":
+            self.q2_rnn = nn.GRU(state_dim + action_dim, rnn_hidden, rnn_layers, batch_first=True)
+        
+        self.q2_fc1 = nn.Linear(rnn_hidden, hidden_dim)
+        self.q2_fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.q2_fc3 = nn.Linear(hidden_dim, 1)
+    
+    def forward(self, states, actions, hidden=None):
+        """
+        Args:
+            states: (B, T, state_dim) 상태 시퀀스
+            actions: (B, T, action_dim) 액션 시퀀스
+            hidden: RNN 은닉 상태 ((q1_h, q1_c), (q2_h, q2_c)) for LSTM or (q1_h, q2_h) for GRU
+        
+        Returns:
+            q1: (B, T, 1) Q1 값
+            q2: (B, T, 1) Q2 값
+            hidden: 업데이트된 RNN 은닉 상태 ((q1_h, q1_c), (q2_h, q2_c))
+        """
+        # 상태와 액션 결합
+        sa = torch.cat([states, actions], dim=-1)  # (B, T, state_dim + action_dim)
+        
+        # Q1, Q2 각각의 은닉 상태 분리
+        if isinstance(self.q1_rnn, nn.LSTM):
+            h1, c1, h2, c2 = None, None, None, None
+            if hidden is not None:
+                (h1, c1), (h2, c2) = hidden
+            q1_out, (q1_h, q1_c) = self.q1_rnn(sa, (h1, c1) if h1 is not None else None)
+            q2_out, (q2_h, q2_c) = self.q2_rnn(sa, (h2, c2) if h2 is not None else None)
+        else:  # GRU
+            h1 = h2 = None
+            if hidden is not None:
+                h1, h2 = hidden
+            q1_out, q1_h = self.q1_rnn(sa, h1)
+            q2_out, q2_h = self.q2_rnn(sa, h2)
+        
+        # Q1 계산
+        q1 = F.relu(self.q1_fc1(q1_out))  # (B, T, hidden_dim)
+        q1 = F.relu(self.q1_fc2(q1))      # (B, T, hidden_dim)
+        q1 = self.q1_fc3(q1)              # (B, T, 1)
+        
+        # Q2 계산
+        q2 = F.relu(self.q2_fc1(q2_out))  # (B, T, hidden_dim)
+        q2 = F.relu(self.q2_fc2(q2))      # (B, T, hidden_dim)
+        q2 = self.q2_fc3(q2)              # (B, T, 1)
+        
+        # 은닉 상태 반환 (LSTM: (h,c) 튜플, GRU: h 텐서)
+        if isinstance(self.q1_rnn, nn.LSTM):
+            return q1, q2, ((q1_h, q1_c), (q2_h, q2_c))
+        else:
+            return q1, q2, (q1_h, q2_h)
+    
+    def init_hidden(self, batch_size=1, device=None):
+        """은닉 상태 초기화"""
+        if device is None:
+            device = next(self.parameters()).device
+        
+        if isinstance(self.q1_rnn, nn.LSTM):
+            h_0 = torch.zeros(self.rnn_layers, batch_size, self.rnn_hidden, device=device)
+            c_0 = torch.zeros(self.rnn_layers, batch_size, self.rnn_hidden, device=device)
+            return (h_0, c_0)
+        else:  # GRU
+            h_0 = torch.zeros(self.rnn_layers, batch_size, self.rnn_hidden, device=device)
+            return h_0
+
+# 기존 Critic은 B안에서 사용하지 않음 (호환성 유지)
 class Critic(nn.Module):
     def __init__(self, state_dim, action_dim, hidden_dim=256):
         super().__init__()
@@ -340,6 +532,115 @@ class Critic(nn.Module):
 # =========================
 # Replay Buffer
 # =========================    
+class SequenceReplayBuffer:
+    """
+    B안: RNN을 위한 시퀀스 리플레이 버퍼
+    
+    에피소드별로 연속된 전이를 저장하고 시퀀스 단위로 샘플링합니다.
+    RNN 학습을 위해 Truncated BPTT에 적합한 형태로 데이터를 제공합니다.
+    
+    Features:
+    - 전이 수 기준 용량 관리
+    - 패딩 마스크 지원
+    - 에피소드별 연속 시퀀스 보장
+    - 메모리 효율적인 배치 샘플링
+    """
+    def __init__(self, capacity=Constants.DEFAULT_REPLAY_BUFFER_SIZE, seq_len=64):
+        self.capacity = capacity  # capacity = 총 전이 수(steps)
+        self.seq_len = seq_len
+        self.episodes = []  # 에피소드별 전이 리스트
+        self.current_episode = []  # 현재 에피소드 전이들
+        self.total_transitions = 0  # 전이 수 추적
+        
+    def push(self, state, action, reward, next_state, done):
+        """전이를 현재 에피소드에 추가"""
+        try:
+            # 입력 검증
+            if state is None or len(state) != 6:
+                raise ValueError(f"상태는 6차원 벡터여야 합니다: {state}")
+            if next_state is None or len(next_state) != 6:
+                raise ValueError(f"다음 상태는 6차원 벡터여야 합니다: {next_state}")
+            
+            self.current_episode.append((state, action, reward, next_state, done))
+            
+            # 에피소드 종료 시 전체 에피소드를 저장
+            if done:
+                ep = self.current_episode
+                self.episodes.append(ep.copy())  # 길이 상관없이 저장
+                self.total_transitions += len(ep)
+                # 용량 초과 시 오래된 에피소드부터 제거
+                while self.total_transitions > self.capacity and self.episodes:
+                    dropped = self.episodes.pop(0)
+                    self.total_transitions -= len(dropped)
+                self.current_episode.clear()
+                
+        except Exception as e:
+            Logger.log("ERROR", f"전이 저장 실패: {e}")
+            # 에러 발생 시 현재 에피소드 초기화
+            self.current_episode.clear()
+    
+    def sample(self, batch_size):
+        """시퀀스 배치 샘플링 (B, T, D) 형태 - 패딩 마스크 포함"""
+        if not self.episodes:
+            raise ValueError("샘플링할 에피소드가 없습니다")
+        
+        batch_episodes = random.sample(self.episodes, min(batch_size, len(self.episodes)))
+        
+        B, T = len(batch_episodes), self.seq_len
+        states = np.zeros((B, T, 6), np.float32)
+        actions = np.zeros((B, T, 1), np.float32)
+        rewards = np.zeros((B, T), np.float32)
+        next_states = np.zeros((B, T, 6), np.float32)
+        dones = np.zeros((B, T), bool)
+        masks = np.zeros((B, T), bool)  # 기본 0 (패딩 부분)
+        
+        for i, ep in enumerate(batch_episodes):
+            if len(ep) <= T:
+                # 앞에서부터 채우고, 나머지는 패딩(마스크=0)
+                L = len(ep)
+                for j in range(L):
+                    s, a, r, ns, d = ep[j]
+                    states[i, j] = s
+                    actions[i, j, 0] = a
+                    rewards[i, j] = r
+                    next_states[i, j] = ns
+                    dones[i, j] = d
+                    masks[i, j] = True  # 유효한 데이터
+            else:
+                # 랜덤 시작점에서 시퀀스 샘플링
+                start = random.randint(0, len(ep) - T)
+                window = ep[start:start + T]
+                for j, (s, a, r, ns, d) in enumerate(window):
+                    states[i, j] = s
+                    actions[i, j, 0] = a
+                    rewards[i, j] = r
+                    next_states[i, j] = ns
+                    dones[i, j] = d
+                    masks[i, j] = True  # 유효한 데이터
+        
+        return states, actions, rewards, next_states, dones, masks
+    
+    def __len__(self):
+        return self.total_transitions  # 전이 수 반환
+    
+    def get_episode_count(self):
+        return len(self.episodes)
+    
+    def get_total_transitions(self):
+        return self.total_transitions
+    
+    def finalize_episode(self):
+        """현재 에피소드를 강제로 종료/저장"""
+        if self.current_episode:
+            self.episodes.append(self.current_episode.copy())
+            self.total_transitions += len(self.current_episode)
+            # 용량 초과 시 오래된 에피소드부터 제거
+            while self.total_transitions > self.capacity and self.episodes:
+                dropped = self.episodes.pop(0)
+                self.total_transitions -= len(dropped)
+            self.current_episode.clear()
+
+# 기존 ReplayBuffer는 B안에서 사용하지 않음 (호환성 유지)
 class ReplayBuffer:
     def __init__(self, capacity=Constants.DEFAULT_REPLAY_BUFFER_SIZE):
         self.buffer = deque(maxlen=capacity)
@@ -384,7 +685,7 @@ class ControlPerformanceLogger:
         # 에피소드별 지표 저장
         self.episode_metrics = []
         
-        print(f"📁 Control Performance 저장 폴더: {self.control_perf_dir}")
+        Logger.log("INFO", f"📁 Control Performance 저장 폴더: {self.control_perf_dir}")
 
     def add_data_point(self, time, force, target, control_effort, pi_output):
         """실시간 데이터 포인트 추가 (100Hz에서 호출)"""
@@ -638,7 +939,7 @@ class LearningDoneLogger:
         os.makedirs(self.log_dir, exist_ok=True)
         os.makedirs(self.reward_breakdown_dir, exist_ok=True)
         
-        print(f"📁 Learning Done 저장 폴더: {self.log_dir}")
+        Logger.log("INFO", f"📁 Learning Done 저장 폴더: {self.log_dir}")
 
     def copy_episode_rewards(self, episode_rewards, rlogger_dir):
         """episode_rewards 파일들을 learning_done 폴더로 복사"""
@@ -681,7 +982,7 @@ class RewardBreakdownLogger:
         self.rows = []  # 버퍼
         self.csv_path = os.path.join(self.reward_breakdown_dir, "reward_breakdown.csv")
         self.episode_rewards_path = os.path.join(self.log_dir, "episode_rewards.csv")
-        print(f"📁 Reward breakdown 저장 폴더: {self.reward_breakdown_dir}")
+        Logger.log("INFO", f"📁 Reward breakdown 저장 폴더: {self.reward_breakdown_dir}")
 
     def log_step(self, episode, step, prog, in_band_now, edot_abs, du_abs, reward, is_her):
         self.rows.append({
@@ -726,9 +1027,9 @@ class RewardBreakdownLogger:
             plt.tight_layout()
             plt.savefig(filename, dpi=300, bbox_inches='tight')
             plt.close()
-            print(f"   📈 PNG: episode_rewards.png")
+            Logger.log("INFO", f"   📈 PNG: episode_rewards.png")
         except Exception as e:
-            print(f"   ⚠️ 에피소드 리워드 그래프 생성 실패: {e}")
+            Logger.log("ERROR", f"   ⚠️ 에피소드 리워드 그래프 생성 실패: {e}")
 
     def _write_csv_append(self):
         file_exists = os.path.exists(self.csv_path)
@@ -754,7 +1055,7 @@ class RewardBreakdownLogger:
             )
             writer.writeheader()
             writer.writerows(self.rows)
-        print(f"   📊 CSV: reward_breakdown.csv")
+        Logger.log("INFO", f"   📊 CSV: reward_breakdown.csv")
 
     def _plot_png(self, start_ep, end_ep):
         # start_ep~end_ep 사이의 데이터만 사용
@@ -853,21 +1154,23 @@ class RewardBreakdownLogger:
         self._plot_png(start_ep, end_ep)
         
         # 저장 완료 메시지
-        print(f"✅ Reward breakdown 저장 완료: {self.log_dir}")
-        print(f"   📊 CSV: reward_breakdown.csv")
+        Logger.log("SUCCESS", f"✅ Reward breakdown 저장 완료: {self.log_dir}")
+        Logger.log("INFO", f"   📊 CSV: reward_breakdown.csv")
         if episode_rewards is not None:
-            print(f"   📈 CSV: episode_rewards.csv")
-        print(f"   📈 PNG: reward_breakdown_*_ep{start_ep}-{end_ep}.png (5개 파일)")
+            Logger.log("INFO", f"   📈 CSV: episode_rewards.csv")
+        Logger.log("INFO", f"   📈 PNG: reward_breakdown_*_ep{start_ep}-{end_ep}.png (5개 파일)")
         
-        # CSV에 저장했으니 rows를 비워도 되지만,
-        # 전체 기간 그래프를 원할 수도 있어 유지 선택 가능.
-        # 여기서는 메모리 절약 위해 비움.
+        # 메모리 절약을 위해 처리된 데이터 정리
         self.rows.clear()
 
 # =========================
 # Residual SAC Agent
 # =========================   
-class ResidualSACAgent:
+class RecurrentSACAgent:
+    """
+    B안: RNN 기반 SAC 에이전트
+    LSTM/GRU를 사용하여 시계열 의존성을 학습
+    """
     def __init__(self, cfg=None):
         if cfg is None:
             raise ValueError("cfg 파라미터가 필요합니다")
@@ -877,78 +1180,216 @@ class ResidualSACAgent:
         self.gamma, self.tau = cfg["GAMMA"], cfg["TAU"]
         self.alpha = 0.05
         self.auto_entropy_tuning = cfg["AUTO_ENTROPY"]
-        self.actor = Actor(s_dim, a_dim, hidden).to(self.device)
-        self.critic = Critic(s_dim, a_dim, hidden).to(self.device)
-        self.critic_target = Critic(s_dim, a_dim, hidden).to(self.device)
+        
+        # RNN 하이퍼파라미터
+        self.rnn_type = cfg["RNN_TYPE"]
+        self.rnn_hidden = cfg["RNN_HIDDEN"]
+        self.rnn_layers = cfg["RNN_LAYERS"]
+        self.seq_len = cfg["SEQ_LEN"]
+        self.burn_in = cfg["BURN_IN"]
+        
+        # RNN 기반 모델들
+        self.actor = RecurrentActor(s_dim, a_dim, self.rnn_type, self.rnn_hidden, 
+                                   self.rnn_layers, hidden).to(self.device)
+        self.critic = RecurrentCritic(s_dim, a_dim, self.rnn_type, self.rnn_hidden, 
+                                     self.rnn_layers, hidden).to(self.device)
+        self.critic_target = RecurrentCritic(s_dim, a_dim, self.rnn_type, self.rnn_hidden, 
+                                            self.rnn_layers, hidden).to(self.device)
         self.critic_target.load_state_dict(self.critic.state_dict())
+        
+        # Orthogonal 초기화 적용 (장기 의존성 보존)
+        self.actor.apply(_orthogonal_init)
+        self.critic.apply(_orthogonal_init)
+        self.critic_target.apply(_orthogonal_init)
+        
+        # 옵티마이저
         self.actor_opt = optim.Adam(self.actor.parameters(), lr=cfg["LR"])
         self.critic_opt = optim.Adam(self.critic.parameters(), lr=cfg["LR"])
+        
+        # 엔트로피 튜닝
         if self.auto_entropy_tuning:
             self.target_entropy = -torch.prod(torch.tensor([a_dim], device=self.device)).item()
             self.log_alpha = torch.zeros(1, requires_grad=True, device=self.device)
             self.alpha_opt = optim.Adam([self.log_alpha], lr=cfg["LR"])
-        self.replay = ReplayBuffer()
+        
+        # 시퀀스 리플레이 버퍼
+        self.replay = SequenceReplayBuffer(cfg["REPLAY_BUFFER_SIZE"], self.seq_len)
+        
+        # 에이전트 상태
         self.total_steps = 0
         self.episode_rewards = []
         self.max_rewards_history = cfg.get("MAX_EPISODE_REWARDS_HISTORY", 1000)
+        
+        # RNN 은닉 상태 (온라인 추론용)
+        self.actor_hidden = None
+        self.critic_hidden = None
+        self.reset_hidden()
 
+    def reset_hidden(self):
+        """RNN 은닉 상태 초기화"""
+        self.actor_hidden = self.actor.init_hidden(1, self.device)
+        self.critic_hidden = self.critic.init_hidden(1, self.device)
+    
+    def begin_episode(self):
+        """에피소드 시작 시 호출"""
+        self.reset_hidden()
+    
+    def end_episode(self):
+        """에피소드 종료 시 호출 - 더미 전이 제거"""
+        # 전이 추가 금지. 은닉 상태만 리셋
+        self.reset_hidden()
+    
     def select_action(self, state, evaluate=False):
-        state = torch.FloatTensor(state.reshape(1, -1)).to(self.device)
-        with torch.no_grad():
-            if evaluate:
-                mean, _ = self.actor(state)
-                action = torch.tanh(mean)
-            else:
-                action, log_prob = self.actor.sample(state)
-        action = action.cpu().numpy().flatten()
-        return float(action[0] * (self.cfg["R_MAX"]))
+        """
+        B안: RNN 기반 액션 선택
+        단일 상태를 (1, 1, D) 형태로 변환하여 RNN에 입력
+        """
+        try:
+            # 입력 검증
+            if state is None or len(state) != 6:
+                raise ValueError(f"상태는 6차원 벡터여야 합니다: {state}")
+            
+            # 상태를 (1, 1, D) 형태로 변환
+            state_tensor = torch.FloatTensor(state.reshape(1, 1, -1)).to(self.device)
+            
+            with torch.no_grad():
+                if evaluate:
+                    mean, _, self.actor_hidden = self.actor(state_tensor, self.actor_hidden)
+                    action = torch.tanh(mean)
+                else:
+                    mean, log_std, self.actor_hidden = self.actor(state_tensor, self.actor_hidden)
+                    std = log_std.exp()
+                    normal = torch.distributions.Normal(mean, std)
+                    x_t = normal.rsample()
+                    action = torch.tanh(x_t)
+                    log_prob = normal.log_prob(x_t) - torch.log(1 - action.pow(2) + 1e-6)
+            
+            # 액션을 스칼라로 변환
+            action_scalar = action.cpu().numpy().flatten()[0]
+            return float(action_scalar * self.cfg["R_MAX"])
+            
+        except Exception as e:
+            Logger.log("ERROR", f"⚠️ 액션 선택 실패: {e}")
+            # 폴백: 0 액션 반환
+            return 0.0
     
     def store_transition(self, state, action, reward, next_state, done):
+        """전이를 시퀀스 리플레이 버퍼에 저장"""
         norm_action = action / self.cfg["R_MAX"]
         self.replay.push(state, norm_action, reward, next_state, done)
+        
+        # 마지막 상태와 액션 저장 (에피소드 종료 시 사용)
+        self._last_state = next_state
+        self._last_action = action
 
     def update_parameters(self, batch_size=None):
-        bs = batch_size or self.cfg["BATCH_SIZE"]
-        if len(self.replay) < bs: return
+        """
+        B안: Stateful TBPTT 기반 파라미터 업데이트
+        60초 전체 맥락을 유지하는 burn-in 방식으로 긴 시계열 의존성 학습
+        """
+        try:
+            bs = batch_size or self.cfg["BATCH_SIZE"]
+            if len(self.replay) < bs: 
+                return
 
-        s, a, r, ns, d = self.replay.sample(bs)
-        s = torch.FloatTensor(s).to(self.device)
-        a = torch.FloatTensor(a).to(self.device)
-        r = torch.FloatTensor(r).unsqueeze(1).to(self.device)
-        ns = torch.FloatTensor(ns).to(self.device)
-        d = torch.FloatTensor(d).unsqueeze(1).to(self.device)
+            # 시퀀스 배치 샘플링 (B, T, D)
+            s, a, r, ns, d, masks = self.replay.sample(bs)
+            s = torch.FloatTensor(s).to(self.device)
+            a = torch.FloatTensor(a).to(self.device)
+            r = torch.FloatTensor(r).to(self.device)
+            ns = torch.FloatTensor(ns).to(self.device)
+            d = torch.FloatTensor(d).to(self.device)
+            m = torch.BoolTensor(masks).to(self.device)
 
-        with torch.no_grad():
-            na, nlogp = self.actor.sample(ns)
-            q1n, q2n = self.critic_target(ns, na)
-            min_qn = torch.min(q1n, q2n) - self.alpha * nlogp
-            y = r + (1 - d) * self.gamma * min_qn
+            # burn-in 구간과 유효 구간 마스크
+            BURN = self.burn_in
+            T = s.size(1)
+            if BURN >= T:
+                return  # 방어
 
-        q1, q2 = self.critic(s, a)
-        q_loss = F.mse_loss(q1, y) + F.mse_loss(q2, y)
-        self.critic_opt.zero_grad()
-        q_loss.backward()
-        nn.utils.clip_grad_norm_(self.critic.parameters(), 1.0)
-        self.critic_opt.step()
+            burn_mask = torch.zeros_like(m, dtype=torch.bool)
+            burn_mask[:, :BURN] = True
+            eff_mask = m & (~burn_mask)             # 손실 계산 구간
+            eff_den = eff_mask.sum()
+            if eff_den.item() == 0:
+                return
 
-        pi, logp = self.actor.sample(s)
-        q1_pi, q2_pi = self.critic(s, pi)
-        min_q_pi = torch.min(q1_pi, q2_pi)
-        pi_loss = ((self.alpha * logp) - min_q_pi).mean()
-        self.actor_opt.zero_grad()
-        pi_loss.backward()
-        nn.utils.clip_grad_norm_(self.actor.parameters(), 1.0)
-        self.actor_opt.step()
+            # === 1) burn-in으로 은닉 워밍업 ===
+            with torch.no_grad():
+                # Actor burn-in
+                _, _, a_hidden = self.actor(s[:, :BURN, :], None)
+                
+                # Critic burn-in: state, action을 별도로 전달
+                _, _, (q1_h, q2_h) = self.critic(s[:, :BURN, :], a[:, :BURN, :], None)
 
-        if self.auto_entropy_tuning:
-            logp_entropy = logp.squeeze(1)
-            a_loss = -(self.log_alpha * (logp_entropy + self.target_entropy).detach()).mean()
-            self.alpha_opt.zero_grad(); a_loss.backward(); self.alpha_opt.step()
-            self.alpha = self.log_alpha.exp()
+                # Target critic burn-in (다음 상태 + 다음 액션 필요)
+                na_mean_b, na_logstd_b, _ = self.actor(ns[:, :BURN, :], None)
+                na_std_b = na_logstd_b.exp()
+                na_norm_b = torch.distributions.Normal(na_mean_b, na_std_b)
+                x_b = na_norm_b.rsample()
+                na_b = torch.tanh(x_b)
+                _, _, (tq1_h, tq2_h) = self.critic_target(ns[:, :BURN, :], na_b, None)
 
-        with torch.no_grad():
-            for tp, lp in zip(self.critic_target.parameters(), self.critic.parameters()):
-                tp.data.copy_(self.tau * lp.data + (1 - self.tau) * tp.data)
+            # === 2) 유효구간 forward & 손실 ===
+            # Target
+            with torch.no_grad():
+                na_mean, na_logstd, _ = self.actor(ns[:, BURN:, :], a_hidden)  # ← burn-in hidden 사용
+                na_std = na_logstd.exp()
+                na_norm = torch.distributions.Normal(na_mean, na_std)
+                x_na = na_norm.rsample()
+                na = torch.tanh(x_na)
+                na_lp = (na_norm.log_prob(x_na) - torch.log(1 - na.pow(2) + 1e-6)).sum(-1, keepdim=True)
+
+                q1n, q2n, _ = self.critic_target(ns[:, BURN:, :], na, (tq1_h, tq2_h))
+                min_qn = torch.min(q1n, q2n) - self.alpha * na_lp
+                y = r[:, BURN:].unsqueeze(-1) + (1 - d[:, BURN:].unsqueeze(-1)) * self.gamma * min_qn
+
+            # Critic
+            q1, q2, _ = self.critic(s[:, BURN:, :], a[:, BURN:, :], (q1_h, q2_h))
+            mask = eff_mask[:, BURN:].unsqueeze(-1).float()
+            den = mask.sum()
+            if den.item() == 0:
+                return
+            q1_loss = ((q1 - y).pow(2) * mask).sum() / den
+            q2_loss = ((q2 - y).pow(2) * mask).sum() / den
+            q_loss = q1_loss + q2_loss
+            self.critic_opt.zero_grad()
+            q_loss.backward()
+            nn.utils.clip_grad_norm_(self.critic.parameters(), 1.0)
+            self.critic_opt.step()
+
+            # Actor
+            pi_mean, pi_logstd, _ = self.actor(s[:, BURN:, :], a_hidden)
+            pi_std = pi_logstd.exp()
+            pi_norm = torch.distributions.Normal(pi_mean, pi_std)
+            x_pi = pi_norm.rsample()
+            pi = torch.tanh(x_pi)
+            pi_lp = (pi_norm.log_prob(x_pi) - torch.log(1 - pi.pow(2) + 1e-6)).sum(-1, keepdim=True)
+            q1_pi, q2_pi, _ = self.critic(s[:, BURN:, :], pi, (q1_h, q2_h))
+            min_q_pi = torch.min(q1_pi, q2_pi)
+            pi_loss = ((self.alpha * pi_lp) - min_q_pi) * mask
+            pi_loss = pi_loss.sum() / den
+            self.actor_opt.zero_grad()
+            pi_loss.backward()
+            nn.utils.clip_grad_norm_(self.actor.parameters(), 1.0)
+            self.actor_opt.step()
+
+            # Alpha (entropy)
+            if self.auto_entropy_tuning:
+                a_loss = -(self.log_alpha * (pi_lp + self.target_entropy).detach())
+                a_loss = (a_loss * mask).sum() / den
+                self.alpha_opt.zero_grad()
+                a_loss.backward()
+                self.alpha_opt.step()
+                self.alpha = self.log_alpha.exp()
+
+            # Target soft-update
+            with torch.no_grad():
+                for tp, lp in zip(self.critic_target.parameters(), self.critic.parameters()):
+                    tp.data.copy_(self.tau * lp.data + (1 - self.tau) * tp.data)
+
+        except Exception as e:
+            Logger.log("ERROR", f"파라미터 업데이트 실패: {e}")
 
     def save_model(self, path):
         torch.save({
@@ -960,12 +1401,12 @@ class ResidualSACAgent:
             "total_steps": self.total_steps,
             "episode_rewards": self.episode_rewards,
         }, path)
-        print(f"💾 Saved: {path}")
+        Logger.log("SUCCESS", f"💾 Saved: {path}")
 
 # =========================
 # TCP Communicator
 # =========================
-class ResidualRLCommunicator:
+class RNNRLCommunicator:
     def __init__(self, host, port, recv_timeout, recv_loop_timeout=0.05, cfg=None):
         self.host, self.port = host, port 
         self.recv_timeout = recv_timeout
@@ -1219,20 +1660,21 @@ class ResidualRLCommunicator:
 # =========================
 class PneumaticPolishingEnvironment:
     """
-    A안: 프레임 스태킹을 적용한 공압 폴리싱 환경
+    B안: RNN 기반 공압 폴리싱 환경
     
     주요 특징:
-    - 과거 8개 시점의 state와 action을 스택하여 시계열 맥락 제공
-    - 액션 스무딩으로 공압계의 저역통과 특성 고려
-    - 60초 에피소드로 relaxation 효과 충분히 관찰
+    - LSTM/GRU를 사용하여 장기 시계열 의존성 학습
+    - 시퀀스 리플레이 버퍼로 연속된 전이 저장
+    - Truncated BPTT로 안정적인 RNN 학습
+    - 에피소드 경계에서 RNN 은닉 상태 초기화
     - HER(Hindsight Experience Replay) 지원
     """
     def __init__(self, cfg=None):
         if cfg is None:
             raise ValueError("cfg 파라미터가 필요합니다")
         self.cfg = cfg
-        self.agent = ResidualSACAgent(cfg)
-        self.comm = ResidualRLCommunicator(cfg["HOST"], cfg["PORT"], cfg["RECV_TIMEOUT_SEC"], cfg["RECV_LOOP_TIMEOUT_SEC"], cfg)
+        self.agent = RecurrentSACAgent(cfg)
+        self.comm = RNNRLCommunicator(cfg["HOST"], cfg["PORT"], cfg["RECV_TIMEOUT_SEC"], cfg["RECV_LOOP_TIMEOUT_SEC"], cfg)
         self.prev_residual = 0.0
         self.episode_step = 0
         self.max_episode_steps = cfg["MAX_EPISODE_STEPS"]
@@ -1252,9 +1694,7 @@ class PneumaticPolishingEnvironment:
         self.update_interval = 1.0 / cfg["UPDATE_FREQ_HZ"]
         self.last_update_time = None
         
-        # A안: 프레임 스태킹을 위한 버퍼들
-        self.state_stack = deque(maxlen=cfg["STACK_K_STATE"])
-        self.action_stack = deque(maxlen=cfg["STACK_K_ACTION"])
+        # B안: RNN이 시계열 처리하므로 스택 버퍼 불필요
         
         # ==== ADDED: 에피소드 전환 감지용 변수들 ====
         self.episode_transition_detected = False  # 에피소드 전환 감지 플래그
@@ -1300,50 +1740,7 @@ class PneumaticPolishingEnvironment:
     def _log(self, level, message):
         Logger.log(level, message)
     
-    def _build_agent_obs(self, raw_state):
-        """
-        A안: 스택 관측 생성기 (과거 state + action을 결합)
-        
-        Args:
-            raw_state: 현재 6차원 상태 벡터 [current_force, target_force, force_error, force_error_dot, force_error_int, pi_output]
-            
-        Returns:
-            obs: 스택된 관측 벡터 (6*STACK_K_STATE + STACK_K_ACTION 차원)
-        """
-        try:
-            # 입력 검증
-            if raw_state is None or len(raw_state) != 6:
-                raise ValueError(f"raw_state는 6차원 벡터여야 합니다: {raw_state}")
-            
-            # state 스택에 최신 raw_state 추가
-            self.state_stack.append(raw_state.copy())
-            
-            # 부족한 부분을 채움 (에피소드 시작 시) - 최적화: 한 번에 처리
-            if len(self.state_stack) < self.cfg["STACK_K_STATE"]:
-                for _ in range(self.cfg["STACK_K_STATE"] - len(self.state_stack)):
-                    self.state_stack.append(raw_state.copy())
-            
-            if len(self.action_stack) < self.cfg["STACK_K_ACTION"]:
-                for _ in range(self.cfg["STACK_K_ACTION"] - len(self.action_stack)):
-                    self.action_stack.append(0.0)
-            
-            # 스택들을 concatenate하여 관측 생성 (성능 최적화)
-            state_obs = np.concatenate(list(self.state_stack), axis=0)
-            action_obs = np.array(list(self.action_stack), dtype=np.float32)
-            obs = np.concatenate([state_obs, action_obs], axis=0).astype(np.float32)
-            
-            # 출력 검증
-            expected_dim = 6 * self.cfg["STACK_K_STATE"] + self.cfg["STACK_K_ACTION"]
-            if len(obs) != expected_dim:
-                raise ValueError(f"관측 차원 불일치: {len(obs)} != {expected_dim}")
-            
-            return obs
-            
-        except Exception as e:
-            self._log("ERROR", f"스택 관측 생성 실패: {e}")
-            # 폴백: 기본 관측 반환
-            fallback_obs = np.zeros(6 * self.cfg["STACK_K_STATE"] + self.cfg["STACK_K_ACTION"], dtype=np.float32)
-            return fallback_obs
+    # B안: RNN이 시계열 처리하므로 _build_agent_obs 메서드 불필요
 
     def generate_episode_reward_graph(self, save_to_rlogger_folder=True):
         if not hasattr(self, 'agent') or not self.agent.episode_rewards:
@@ -1555,6 +1952,10 @@ class PneumaticPolishingEnvironment:
 
     def end_episode_fast_with_reliable_flag(self, ep, target_force):
         self._log("INFO", f"🎯 에피소드 {ep+1} 완료 (단계 {self.episode_step})")
+        
+        # B안: 에피소드 종료 시 RNN 은닉 상태 정리
+        self.agent.end_episode()
+        
         success = self.comm.send_residual(0.0, True, True, False)  # episode_done=True, learning_done=False
         if success:
             self._log("INFO", f"📡 Episode done 신호 전송 성공")
@@ -1592,9 +1993,8 @@ class PneumaticPolishingEnvironment:
         self.prev_action_for_du = 0.0
         self.prev_action_for_du_her = 0.0
         
-        # A안: 스택 버퍼 초기화 및 프리필
-        self.state_stack.clear()
-        self.action_stack.clear()
+        # B안: RNN 은닉 상태 초기화 (에피소드 시작)
+        self.agent.begin_episode()
         
         # ==== ADDED: 에피소드 전환 관련 변수 초기화 ====
         self.episode_transition_detected = False
@@ -1604,11 +2004,7 @@ class PneumaticPolishingEnvironment:
         if state is not None:
             self.previous_target_force = state[1]
             self._log("INFO", f"에피소드 목표 힘: {self.previous_target_force:.1f}N")
-            # A안: 첫 state로 스택 프리필
-            for _ in range(self.cfg["STACK_K_STATE"]):
-                self.state_stack.append(state.copy())
-            for _ in range(self.cfg["STACK_K_ACTION"]):
-                self.action_stack.append(0.0)
+            # B안: RNN이 시계열 처리하므로 스택 불필요
         ok = self.comm.send_reset()
         if ok:
             self._log("INFO", "\n--- 에피소드 리셋 ---")
@@ -1737,13 +2133,8 @@ class PneumaticPolishingEnvironment:
                 self.episode_step += 1
                 done, success = self.is_done(state)
                 
-                # A안: 스택 관측 생성 (에러 핸들링 포함)
-                try:
-                    obs = self._build_agent_obs(state)
-                except Exception as e:
-                    self._log("ERROR", f"스택 관측 생성 실패: {e}")
-                    # 폴백: 기본 관측 사용
-                    obs = np.zeros(self.cfg["STATE_DIM"], dtype=np.float32)
+                # B안: RNN이 원본 상태를 직접 처리
+                obs = state  # RNN이 시계열 처리하므로 스택 불필요
                 
                 # ==== ADDED: 실시간 제어 지표 데이터 수집 ====
                 if state is not None:
@@ -1763,11 +2154,8 @@ class PneumaticPolishingEnvironment:
                         prev_state, prev_action, state, prev_state[1],
                         terminal_success=success, return_components=True
                     )
-                    # A안: 스택 관측으로 저장 (prev_obs는 이전 스택 관측)
-                    if 'prev_obs' in locals():
-                        self.agent.store_transition(prev_obs, prev_action, reward, obs, done)
-                    else:
-                        # 첫 번째 스텝의 경우 raw state 사용
+                    # B안: RNN용 전이 저장 (원본 상태 사용)
+                    if 'prev_state' in locals():
                         self.agent.store_transition(prev_state, prev_action, reward, state, done)
                     self.current_episode_reward += reward
 
@@ -1819,7 +2207,7 @@ class PneumaticPolishingEnvironment:
                                 prev_state, prev_action, state, achieved_goal, 
                                 terminal_success=False, return_components=True
                             )
-                            self.agent.store_transition(prev_obs, prev_action, her_reward, obs, done)
+                            self.agent.store_transition(prev_state, prev_action, her_reward, state, done)
                             
                             # HER residual 업데이트는 루프 외부에서 수행
 
@@ -1836,22 +2224,25 @@ class PneumaticPolishingEnvironment:
                                     is_her=1
                                 )
                 
-                # HER 루프 완료 후 |Δu| 계산용 변수 업데이트
-                if prev_action is not None:
+                # HER 루프 완료 후 |Δu| 계산용 변수 업데이트 (보상 계산 후에만)
+                if prev_state is not None and prev_action is not None:  # 첫 스텝은 건너뜀
                     self.prev_action_for_du = prev_action
                     self.prev_action_for_du_her = prev_action
                 
-                if (len(self.agent.replay) > self.cfg["REPLAY_WARMUP"] and 
+                if (self.agent.replay.get_total_transitions() >= self.cfg["REPLAY_WARMUP"] and
                     self.should_update_now()):
                     self.agent.update_parameters(self.cfg["BATCH_SIZE"])
                 
                 rl_status = self.check_rl_status(sander_active)
                 if rl_status == "terminate":
                     self._log("INFO", "RL 비활성 지속으로 에피소드 종료")
+                    # 리플레이 버퍼 강제 플러시
+                    self.agent.replay.finalize_episode()
                     break
                 elif rl_status == "episode_end":
                     self._log("INFO", "🏁 sander_active=0으로 에피소드 종료 감지 - 로봇 리셋 대기 중...")
-                    # 에피소드 종료 처리
+                    # 에피소드 종료 처리 - 리플레이 버퍼 강제 플러시
+                    self.agent.replay.finalize_episode()
                     episode_done = True
                     rl_residual = 0.0
                     break
@@ -1870,7 +2261,7 @@ class PneumaticPolishingEnvironment:
                     episode_done = False
                     if sander_active:
                         try:
-                            # A안: 스택 관측으로 액션 선택
+                            # B안: RNN으로 액션 선택
                             raw_res = self.agent.select_action(obs, evaluate=False)
                             rl_residual = self.limit_residual(raw_res)
                             episode_rl_active_steps += 1
@@ -1912,26 +2303,35 @@ class PneumaticPolishingEnvironment:
                     mode = "RESIDUAL" if sander_active else "PI-ONLY"
                     force_achieved = " 🎯 TARGET ACHIEVED!" if abs(state[0] - state[1]) < 0.5 else ""
                     timing_status = "EXACT" if timing_accurate else "LATE"
+                    
+                    # RNN 메모리 정보 (60초 전체 맥락)
+                    memory_sec = 60.0  # RNN은 60초 전체 맥락 사용
+                    state_dim = self.cfg["STATE_DIM"]
+                    
+                    # GPU 메모리 정보 추가
+                    gpu_info = ""
+                    if torch.cuda.is_available():
+                        allocated = torch.cuda.memory_allocated() / 1024**3  # GB
+                        reserved = torch.cuda.memory_reserved() / 1024**3     # GB
+                        gpu_info = f" | GPU: {allocated:.1f}GB/{reserved:.1f}GB"
+                    
+                    # 시스템 메모리 정보 추가
+                    memory = psutil.virtual_memory()
+                    sys_mem = f" | RAM: {memory.percent:.1f}%"
+                    
                     self._log("INFO", f"[에피 {ep+1}] 단계 {self.episode_step} | {mode} | "
                           f"F {state[0]:.1f}/{state[1]:.1f}N | "
                           f"PI {state[5]:.3f}MPa | RL {rl_residual:.3f}MPa | {timing_status} | "
-                          f"Time: {current_time - episode_start_time:.1f}s | "
-                          f"RL_Flag: {sander_active}{force_achieved}")
+                          f"RL_Flag: {sander_active} | "
+                          f"메모리: {memory_sec:.1f}s({state_dim}D){gpu_info}{sys_mem}{force_achieved}")
                     self.last_log_time = current_time
 
-                # A안: 스택 관측과 액션 히스토리 업데이트
+                # B안: RNN용 상태 업데이트
                 prev_state = state.copy()
-                prev_obs = obs.copy()
                 prev_action = rl_residual
                 prev_sander_active = sander_active
                 
-                # 액션 히스토리 업데이트 (다음 스텝에서 사용) - 정규화된 액션 저장
-                # 성능 최적화: sander_active일 때만 업데이트
-                if sander_active:
-                    normalized_action = float(np.clip(rl_residual / self.cfg["R_MAX"], -1.0, 1.0))
-                    self.action_stack.append(normalized_action)
-                else:
-                    self.action_stack.append(0.0)
+                # B안: RNN이 시계열 처리하므로 액션 히스토리 불필요
 
             # ---- episode end ----
             episode_duration = time.perf_counter() - episode_start_time
@@ -2034,21 +2434,21 @@ class PneumaticPolishingEnvironment:
 # Signal Handler for Safe Exit
 # =========================
 def signal_handler(signum, frame):
-    print(f"\n⚠️ Received signal {signum}. Shutting down gracefully...")
+    Logger.log("WARNING", f"⚠️ Received signal {signum}. Shutting down gracefully...")
     if 'env' in globals():
         try:
             # ==== ADDED: 강제 종료 시 learning_done=True 전송 ====
-            print("📡 강화학습 강제 종료 신호 전송 중...")
+            Logger.log("INFO", "📡 강화학습 강제 종료 신호 전송 중...")
             try:
                 success = env.comm.send_residual(0.0, True, False, True)  # learning_done=True
                 if success:
-                    print("✅ 강화학습 강제 종료 신호 전송 성공")
+                    Logger.log("SUCCESS", "✅ 강화학습 강제 종료 신호 전송 성공")
                 else:
-                    print("⚠️ 강화학습 강제 종료 신호 전송 실패")
+                    Logger.log("ERROR", "⚠️ 강화학습 강제 종료 신호 전송 실패")
             except Exception as e:
-                print(f"⚠️ 강화학습 강제 종료 신호 전송 오류: {e}")
+                Logger.log("ERROR", f"⚠️ 강화학습 강제 종료 신호 전송 오류: {e}")
             
-            print("📈 데이터 저장 중...")
+            Logger.log("INFO", "📈 데이터 저장 중...")
             # ==== ADDED: 강제 종료 시에도 지금까지 쌓인 로우를 저장/그림 ====
             # ==== ADDED: 모든 데이터 저장 (중복 제거) ====
             current_episode = len(env.agent.episode_rewards)
@@ -2066,26 +2466,29 @@ if __name__ == "__main__":
     SEND_FREQUENCY_HZ = 100
     RECV_FREQUENCY_HZ = 1000
     config = create_config(SEND_FREQUENCY_HZ, RECV_FREQUENCY_HZ)
-    print("🚀 A안: 프레임 스태킹 방식 - JY_Pneumatic_SAC_Pre_only_2_main.py")
-    print(f"⚡ 송신 주파수: {SEND_FREQUENCY_HZ}Hz (간격: {config['TICK_SEC']:.3f}초)")
-    print(f"📡 수신 주파수: {RECV_FREQUENCY_HZ}Hz (간격: {config['RECV_INTERVAL_SEC']:.3f}초)")
-    print(f"📊 A안 설정: STATE_DIM={config['STATE_DIM']} (6×{config['STACK_K_STATE']}+{config['STACK_K_ACTION']})")
-    print(f"🔄 스택 크기: State={config['STACK_K_STATE']}, Action={config['STACK_K_ACTION']}")
-    print(f"🎛️ 액션 스무딩: β={config['ACTION_SMOOTH_BETA']}")
-    print(f"⏱️ 에피소드 길이: {config['MAX_EPISODE_STEPS']} 스텝 ({config['MAX_EPISODE_STEPS'] * config['TICK_SEC']:.1f}초)")
-    print(f"🧠 메모리: 과거 {config['STACK_K_STATE']}개 state + {config['STACK_K_ACTION']}개 action")
-    print(f"⚡ 최적화: 공압 relaxation 특성 학습을 위한 시계열 입력")
-    print("=" * 60)
+    Logger.log("INFO", "🚀 B안: Stateful TBPTT RNN 방식 - JY_Pneumatic_SAC_Pre_only_3_main.py")
+    Logger.log("INFO", "🎮 RTX 5090 + AMD 라이젠 최적화 버전 (60초 전체 맥락)")
+    Logger.log("INFO", f"⚡ 송신 주파수: {SEND_FREQUENCY_HZ}Hz (간격: {config['TICK_SEC']:.3f}초)")
+    Logger.log("INFO", f"📡 수신 주파수: {RECV_FREQUENCY_HZ}Hz (간격: {config['RECV_INTERVAL_SEC']:.3f}초)")
+    Logger.log("INFO", f"📊 B안 설정: STATE_DIM={config['STATE_DIM']} (원본 6차원)")
+    Logger.log("INFO", f"🧠 RNN: {config['RNN_TYPE']} (은닉={config['RNN_HIDDEN']}, 레이어={config['RNN_LAYERS']})")
+    Logger.log("INFO", f"📏 Stateful TBPTT: SEQ_LEN={config['SEQ_LEN']}, BURN_IN={config['BURN_IN']} (60초 맥락)")
+    Logger.log("INFO", f"🎛️ 액션 스무딩: β={config['ACTION_SMOOTH_BETA']}")
+    Logger.log("INFO", f"⏱️ 에피소드 길이: {config['MAX_EPISODE_STEPS']} 스텝 ({config['MAX_EPISODE_STEPS'] * config['TICK_SEC']:.1f}초)")
+    Logger.log("INFO", f"🧠 메모리: RNN 은닉 상태로 60초 전체 맥락 유지")
+    Logger.log("INFO", f"⚡ 최적화: 공압 relaxation 특성 학습을 위한 stateful TBPTT")
+    Logger.log("INFO", f"🎮 GPU 최적화: HIDDEN={config['HIDDEN']}, BATCH={config['BATCH_SIZE']}, BUFFER={config.get('REPLAY_BUFFER_SIZE', 'N/A')}")
+    Logger.log("INFO", "=" * 60)
     np.random.seed(42) 
     torch.manual_seed(42)
     random.seed(42)
     env = PneumaticPolishingEnvironment(config)
     try:
-        print(f"🚀 Starting A안 (Frame Stacking) training for {SEND_FREQUENCY_HZ}Hz stable performance...")
+        Logger.log("INFO", f"🚀 Starting B안 (RNN) training for {SEND_FREQUENCY_HZ}Hz stable performance...")
         env.run_training(config["EPISODES"])
-        print("✅ Training completed successfully!")
+        Logger.log("SUCCESS", "✅ Training completed successfully!")
         try:
-            print("📈 데이터 저장 중...")
+            Logger.log("INFO", "📈 데이터 저장 중...")
             # ==== ADDED: 모든 데이터 저장 (중복 제거) ====
             DataSaver.save_on_completion(env)
         except Exception as e:
@@ -2094,14 +2497,14 @@ if __name__ == "__main__":
         Logger.log("WARNING", "Interrupted by user.")
         # ==== ADDED: KeyboardInterrupt 시 learning_done=True 전송 ====
         try:
-            print("📡 강화학습 중단 신호 전송 중...")
+            Logger.log("INFO", "📡 강화학습 중단 신호 전송 중...")
             success = env.comm.send_residual(0.0, True, False, True)  # learning_done=True
             if success:
-                print("✅ 강화학습 중단 신호 전송 성공")
+                Logger.log("SUCCESS", "✅ 강화학습 중단 신호 전송 성공")
             else:
-                print("⚠️ 강화학습 중단 신호 전송 실패")
+                Logger.log("ERROR", "⚠️ 강화학습 중단 신호 전송 실패")
         except Exception as e:
-            print(f"⚠️ 강화학습 중단 신호 전송 오류: {e}")
+            Logger.log("ERROR", f"⚠️ 강화학습 중단 신호 전송 오류: {e}")
         
         # ==== ADDED: 모든 데이터 저장 ====
         DataSaver.save_on_interrupt(env)
