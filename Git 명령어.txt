@@ -1,0 +1,49 @@
+#################################################
+# commit 규칙
+comment: 알림
+feat : 새로운 기능 추가 (feature)
+fix : 버그 수정 (bug fix)
+refactor : 코드 구조 변경 (리팩토링)
+docs : 문서 수정
+
+#################################################
+# SSL 우회 명령어
+git config --global http.sslVerify false
+git config --global http.sslVerify true
+
+#################################################
+# 새로운 브랜치 생성 및 기존 브랜치 코드를 붙여넣기
+# 'origin'이라는 이름의 원격 저장소(Github)로부터 모든 최신 변경 정보를 가져옴
+git fecth origin main
+git switch -c "새로만들 브랜치 이름" origin/main
+git push -u origin "새로만든 브랜치 이름"
+git push --set-upstream origin "새로만든 브랜치 이름"
+
+#################################################
+# Merge
+git checkout main
+git pull origin main
+git merge "merge할 브랜치 명"
+git push origin main
+
+#################################################
+# 병합된 Main 브랜치 내용을 기반으로 기능 구현 브랜치 최신화 방법
+git switch "최신화 할 브랜치 명"
+git merge main
+git push origin "최신화 할 브랜치 명"
+
+#################################################
+# 브랜치 삭제
+git branch -d "삭제할 브랜치명"
+git push origin --delete "삭제할 브랜치명"
+git fetch --prune
+
+#################################################
+# git에 커밋된 내용 모두 강제 삭제
+git reset --hard
+
+#################################################
+# 브랜치 명 변경
+git branch -m "예전 브랜치명" "새로운 브랜치명"
+git push origin --delete "예전 브랜치명"
+git push -u origin "새로운 브랜치명"
