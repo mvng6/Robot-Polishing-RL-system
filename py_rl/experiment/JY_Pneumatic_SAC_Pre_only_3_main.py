@@ -15,6 +15,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+import psutil  # 시스템 모니터링용
 import matplotlib
 matplotlib.use('Agg')  # 백엔드를 Agg로 변경 (GUI 불필요)
 import matplotlib.pyplot as plt
@@ -98,7 +99,7 @@ class Constants:
     # =========================
     # 네트워크 관련 상수
     # =========================
-    DEFAULT_HIDDEN_DIM = 256          # 신경망 은닉층 크기 (Actor/Critic 공통)
+    DEFAULT_HIDDEN_DIM = 512          # 신경망 은닉층 크기 (Actor/Critic 공통) - RTX 5090 최적화
     DEFAULT_LR = 1e-3                 # 학습률 (Learning Rate) - 옵티마이저 업데이트 크기
     DEFAULT_GAMMA = 0.99              # 할인 인수 - 미래 보상의 현재 가치 비율
     DEFAULT_TAU = 0.005               # 소프트 업데이트 계수 - 타겟 네트워크 업데이트 속도
@@ -119,7 +120,7 @@ class Constants:
     # =========================
     # 학습 관련 상수
     # =========================
-    DEFAULT_BATCH_SIZE = 128          # 배치 크기 - 한 번에 학습할 경험 개수
+    DEFAULT_BATCH_SIZE = 64           # 배치 크기 - 한 번에 학습할 경험 개수 (RTX 5090 최적화)
     DEFAULT_REPLAY_WARMUP = 10000     # 리플레이 버퍼 워밍업 - 학습 시작 전 최소 경험 수 (30초간 데이터)
     DEFAULT_UPDATE_FREQ = 10          # 네트워크 업데이트 주기 (Hz) - 1초에 10번 학습
     DEFAULT_EPISODES = 250            # 총 에피소드 수 - 전체 학습 횟수
@@ -140,7 +141,7 @@ class Constants:
     # 메모리 관련 상수
     # =========================
     DEFAULT_MAX_REWARDS_HISTORY = 1000        # 최대 보상 기록 수 - 메모리 절약을 위한 제한
-    DEFAULT_REPLAY_BUFFER_SIZE = 2000000      # 리플레이 버퍼 크기 - 저장할 경험의 최대 개수
+    DEFAULT_REPLAY_BUFFER_SIZE = 100000       # 리플레이 버퍼 크기 - 저장할 경험의 최대 개수 (RTX 5090 최적화)
     
     # =========================
     # 경로 관련 상수
@@ -195,12 +196,12 @@ _BASE_CONFIG = {
     "GAMMA": Constants.DEFAULT_GAMMA,
     "TAU": Constants.DEFAULT_TAU,
     "AUTO_ENTROPY": True,
-    # B안: RNN 설정
+    # B안: RNN 설정 (RTX 5090 최적화)
     "RNN_TYPE": "LSTM",                    # RNN 타입: "LSTM" 또는 "GRU"
-    "RNN_HIDDEN": 128,                     # RNN 은닉 상태 크기
-    "RNN_LAYERS": 1,                       # RNN 레이어 수
-    "SEQ_LEN": 64,                         # 시퀀스 길이 (Truncated BPTT)
-    "BURN_IN": 16,                         # 워밍업 길이 (손실 계산 제외)
+    "RNN_HIDDEN": 256,                     # RNN 은닉 상태 크기 (RTX 5090용 증가)
+    "RNN_LAYERS": 2,                       # RNN 레이어 수 (깊은 네트워크)
+    "SEQ_LEN": 384,                        # 시퀀스 길이 (60초 맥락용 최적화)
+    "BURN_IN": 128,                        # 워밍업 길이 (긴 과거 맥락용)
     # B안: RNN 사용으로 스택 설정 불필요 (호환성을 위해 유지)
     "STACK_K_STATE": 1,                    # B안에서는 사용하지 않음
     "STACK_K_ACTION": 1,                   # B안에서는 사용하지 않음
@@ -292,6 +293,22 @@ def _validate_config(config):
 
 # 기본 CONFIG 생성
 CONFIG = create_config()
+
+# =========================
+# Weight Initialization
+# =========================
+def _orthogonal_init(m):
+    """RNN과 Linear 레이어의 가중치를 orthogonal로 초기화 (장기 의존성 보존)"""
+    if isinstance(m, (nn.Linear,)):
+        nn.init.orthogonal_(m.weight)
+        if m.bias is not None:
+            nn.init.zeros_(m.bias)
+    elif isinstance(m, (nn.GRU, nn.LSTM)):
+        for name, param in m.named_parameters():
+            if "weight_ih" in name or "weight_hh" in name:
+                nn.init.orthogonal_(param)
+            elif "bias" in name:
+                nn.init.zeros_(param)
 
 # =========================
 # SAC Models
@@ -438,29 +455,45 @@ class RecurrentCritic(nn.Module):
         Args:
             states: (B, T, state_dim) 상태 시퀀스
             actions: (B, T, action_dim) 액션 시퀀스
-            hidden: RNN 은닉 상태 (h_0, c_0) for LSTM or h_0 for GRU
+            hidden: RNN 은닉 상태 ((q1_h, q1_c), (q2_h, q2_c)) for LSTM or (q1_h, q2_h) for GRU
         
         Returns:
             q1: (B, T, 1) Q1 값
             q2: (B, T, 1) Q2 값
-            hidden: 업데이트된 RNN 은닉 상태
+            hidden: 업데이트된 RNN 은닉 상태 ((q1_h, q1_c), (q2_h, q2_c))
         """
         # 상태와 액션 결합
         sa = torch.cat([states, actions], dim=-1)  # (B, T, state_dim + action_dim)
         
-        # Q1 계산 (최적화된 버전)
-        q1_rnn_out, q1_hidden = self.q1_rnn(sa, hidden)
-        q1 = F.relu(self.q1_fc1(q1_rnn_out))  # (B, T, hidden_dim)
-        q1 = F.relu(self.q1_fc2(q1))          # (B, T, hidden_dim)
-        q1 = self.q1_fc3(q1)                  # (B, T, 1)
+        # Q1, Q2 각각의 은닉 상태 분리
+        if isinstance(self.q1_rnn, nn.LSTM):
+            h1, c1, h2, c2 = None, None, None, None
+            if hidden is not None:
+                (h1, c1), (h2, c2) = hidden
+            q1_out, (q1_h, q1_c) = self.q1_rnn(sa, (h1, c1) if h1 is not None else None)
+            q2_out, (q2_h, q2_c) = self.q2_rnn(sa, (h2, c2) if h2 is not None else None)
+        else:  # GRU
+            h1 = h2 = None
+            if hidden is not None:
+                h1, h2 = hidden
+            q1_out, q1_h = self.q1_rnn(sa, h1)
+            q2_out, q2_h = self.q2_rnn(sa, h2)
         
-        # Q2 계산 (최적화된 버전)
-        q2_rnn_out, q2_hidden = self.q2_rnn(sa, hidden)
-        q2 = F.relu(self.q2_fc1(q2_rnn_out))  # (B, T, hidden_dim)
-        q2 = F.relu(self.q2_fc2(q2))          # (B, T, hidden_dim)
-        q2 = self.q2_fc3(q2)                  # (B, T, 1)
+        # Q1 계산
+        q1 = F.relu(self.q1_fc1(q1_out))  # (B, T, hidden_dim)
+        q1 = F.relu(self.q1_fc2(q1))      # (B, T, hidden_dim)
+        q1 = self.q1_fc3(q1)              # (B, T, 1)
         
-        return q1, q2, q1_hidden  # Q1의 hidden 상태 반환
+        # Q2 계산
+        q2 = F.relu(self.q2_fc1(q2_out))  # (B, T, hidden_dim)
+        q2 = F.relu(self.q2_fc2(q2))      # (B, T, hidden_dim)
+        q2 = self.q2_fc3(q2)              # (B, T, 1)
+        
+        # 은닉 상태 반환 (LSTM: (h,c) 튜플, GRU: h 텐서)
+        if isinstance(self.q1_rnn, nn.LSTM):
+            return q1, q2, ((q1_h, q1_c), (q2_h, q2_c))
+        else:
+            return q1, q2, (q1_h, q2_h)
     
     def init_hidden(self, batch_size=1, device=None):
         """은닉 상태 초기화"""
@@ -1164,6 +1197,11 @@ class RecurrentSACAgent:
                                             self.rnn_layers, hidden).to(self.device)
         self.critic_target.load_state_dict(self.critic.state_dict())
         
+        # Orthogonal 초기화 적용 (장기 의존성 보존)
+        self.actor.apply(_orthogonal_init)
+        self.critic.apply(_orthogonal_init)
+        self.critic_target.apply(_orthogonal_init)
+        
         # 옵티마이저
         self.actor_opt = optim.Adam(self.actor.parameters(), lr=cfg["LR"])
         self.critic_opt = optim.Adam(self.critic.parameters(), lr=cfg["LR"])
@@ -1246,8 +1284,8 @@ class RecurrentSACAgent:
 
     def update_parameters(self, batch_size=None):
         """
-        B안: RNN 기반 파라미터 업데이트
-        시퀀스 배치를 사용하여 Truncated BPTT 수행
+        B안: Stateful TBPTT 기반 파라미터 업데이트
+        60초 전체 맥락을 유지하는 burn-in 방식으로 긴 시계열 의존성 학습
         """
         try:
             bs = batch_size or self.cfg["BATCH_SIZE"]
@@ -1261,86 +1299,97 @@ class RecurrentSACAgent:
             r = torch.FloatTensor(r).to(self.device)
             ns = torch.FloatTensor(ns).to(self.device)
             d = torch.FloatTensor(d).to(self.device)
-            masks = torch.BoolTensor(masks).to(self.device)
-        
-            # Burn-in 마스크 적용 (처음 burn_in 스텝 제외)
-            burn_in_mask = torch.ones_like(masks)
-            burn_in_mask[:, :self.burn_in] = False
-            effective_mask = masks & burn_in_mask
+            m = torch.BoolTensor(masks).to(self.device)
 
-            # Target Q 값 계산
+            # burn-in 구간과 유효 구간 마스크
+            BURN = self.burn_in
+            T = s.size(1)
+            if BURN >= T:
+                return  # 방어
+
+            burn_mask = torch.zeros_like(m, dtype=torch.bool)
+            burn_mask[:, :BURN] = True
+            eff_mask = m & (~burn_mask)             # 손실 계산 구간
+            eff_den = eff_mask.sum()
+            if eff_den.item() == 0:
+                return
+
+            # === 1) burn-in으로 은닉 워밍업 ===
             with torch.no_grad():
-                # 다음 상태에서 액션 샘플링 (tanh-squash 로그확률 수정)
-                na_mean, na_log_std, _ = self.actor(ns, None)  # 은닉 상태 초기화
-                na_std = na_log_std.exp()
-                na_normal = torch.distributions.Normal(na_mean, na_std)
-                x_na = na_normal.rsample()  # squash 전 샘플
-                na = torch.tanh(x_na)  # squash된 액션
-                na_log_prob = na_normal.log_prob(x_na) - torch.log(1 - na.pow(2) + 1e-6)
-                na_log_prob = na_log_prob.sum(dim=-1, keepdim=True)
+                # Actor burn-in
+                _, _, a_hidden = self.actor(s[:, :BURN, :], None)
                 
-                # Target Q 값
-                q1n, q2n, _ = self.critic_target(ns, na, None)
-                min_qn = torch.min(q1n, q2n) - self.alpha * na_log_prob
-                y = r.unsqueeze(-1) + (1 - d.unsqueeze(-1)) * self.gamma * min_qn
+                # Critic burn-in: state, action을 별도로 전달
+                _, _, (q1_h, q2_h) = self.critic(s[:, :BURN, :], a[:, :BURN, :], None)
 
-            # Critic 업데이트
-            q1, q2, _ = self.critic(s, a, None)
-            
-            # 마스크 적용된 손실 계산 (0으로 나누기 방지)
-            mask = effective_mask.unsqueeze(-1).float()
+                # Target critic burn-in (다음 상태 + 다음 액션 필요)
+                na_mean_b, na_logstd_b, _ = self.actor(ns[:, :BURN, :], None)
+                na_std_b = na_logstd_b.exp()
+                na_norm_b = torch.distributions.Normal(na_mean_b, na_std_b)
+                x_b = na_norm_b.rsample()
+                na_b = torch.tanh(x_b)
+                _, _, (tq1_h, tq2_h) = self.critic_target(ns[:, :BURN, :], na_b, None)
+
+            # === 2) 유효구간 forward & 손실 ===
+            # Target
+            with torch.no_grad():
+                na_mean, na_logstd, _ = self.actor(ns[:, BURN:, :], a_hidden)  # ← burn-in hidden 사용
+                na_std = na_logstd.exp()
+                na_norm = torch.distributions.Normal(na_mean, na_std)
+                x_na = na_norm.rsample()
+                na = torch.tanh(x_na)
+                na_lp = (na_norm.log_prob(x_na) - torch.log(1 - na.pow(2) + 1e-6)).sum(-1, keepdim=True)
+
+                q1n, q2n, _ = self.critic_target(ns[:, BURN:, :], na, (tq1_h, tq2_h))
+                min_qn = torch.min(q1n, q2n) - self.alpha * na_lp
+                y = r[:, BURN:].unsqueeze(-1) + (1 - d[:, BURN:].unsqueeze(-1)) * self.gamma * min_qn
+
+            # Critic
+            q1, q2, _ = self.critic(s[:, BURN:, :], a[:, BURN:, :], (q1_h, q2_h))
+            mask = eff_mask[:, BURN:].unsqueeze(-1).float()
             den = mask.sum()
             if den.item() == 0:
-                return  # 학습 스킵 (유효한 마스크가 없음)
-            
+                return
             q1_loss = ((q1 - y).pow(2) * mask).sum() / den
             q2_loss = ((q2 - y).pow(2) * mask).sum() / den
             q_loss = q1_loss + q2_loss
-            
             self.critic_opt.zero_grad()
             q_loss.backward()
             nn.utils.clip_grad_norm_(self.critic.parameters(), 1.0)
             self.critic_opt.step()
 
-            # Actor 업데이트 (tanh-squash 로그확률 수정)
-            pi_mean, pi_log_std, _ = self.actor(s, None)
-            pi_std = pi_log_std.exp()
-            pi_normal = torch.distributions.Normal(pi_mean, pi_std)
-            x_pi = pi_normal.rsample()  # squash 전 샘플
-            pi = torch.tanh(x_pi)  # squash된 액션
-            pi_log_prob = pi_normal.log_prob(x_pi) - torch.log(1 - pi.pow(2) + 1e-6)
-            pi_log_prob = pi_log_prob.sum(dim=-1, keepdim=True)
-            
-            q1_pi, q2_pi, _ = self.critic(s, pi, None)
+            # Actor
+            pi_mean, pi_logstd, _ = self.actor(s[:, BURN:, :], a_hidden)
+            pi_std = pi_logstd.exp()
+            pi_norm = torch.distributions.Normal(pi_mean, pi_std)
+            x_pi = pi_norm.rsample()
+            pi = torch.tanh(x_pi)
+            pi_lp = (pi_norm.log_prob(x_pi) - torch.log(1 - pi.pow(2) + 1e-6)).sum(-1, keepdim=True)
+            q1_pi, q2_pi, _ = self.critic(s[:, BURN:, :], pi, (q1_h, q2_h))
             min_q_pi = torch.min(q1_pi, q2_pi)
-            pi_loss = ((self.alpha * pi_log_prob) - min_q_pi) * mask
-            pi_loss = pi_loss.sum() / den  # 동일한 분모 사용
-            
+            pi_loss = ((self.alpha * pi_lp) - min_q_pi) * mask
+            pi_loss = pi_loss.sum() / den
             self.actor_opt.zero_grad()
             pi_loss.backward()
             nn.utils.clip_grad_norm_(self.actor.parameters(), 1.0)
             self.actor_opt.step()
 
-            # 엔트로피 튜닝 (마스크 적용, 0으로 나누기 방지)
+            # Alpha (entropy)
             if self.auto_entropy_tuning:
-                logp_entropy = pi_log_prob.squeeze(-1)  # (B, T)
-                a_loss = -(self.log_alpha * (logp_entropy + self.target_entropy).detach())
-                denom = effective_mask.float().sum()
-                if denom.item() > 0:
-                    a_loss = (a_loss * effective_mask.float()).sum() / denom
-                    self.alpha_opt.zero_grad()
-                    a_loss.backward()
-                    self.alpha_opt.step()
-                    self.alpha = self.log_alpha.exp()
+                a_loss = -(self.log_alpha * (pi_lp + self.target_entropy).detach())
+                a_loss = (a_loss * mask).sum() / den
+                self.alpha_opt.zero_grad()
+                a_loss.backward()
+                self.alpha_opt.step()
+                self.alpha = self.log_alpha.exp()
 
-            # Target 네트워크 업데이트
+            # Target soft-update
             with torch.no_grad():
                 for tp, lp in zip(self.critic_target.parameters(), self.critic.parameters()):
                     tp.data.copy_(self.tau * lp.data + (1 - self.tau) * tp.data)
-                    
+
         except Exception as e:
             Logger.log("ERROR", f"파라미터 업데이트 실패: {e}")
-            # 에러 발생 시에도 학습을 계속할 수 있도록 예외를 다시 발생시키지 않음
 
     def save_model(self, path):
         torch.save({
@@ -2254,11 +2303,27 @@ class PneumaticPolishingEnvironment:
                     mode = "RESIDUAL" if sander_active else "PI-ONLY"
                     force_achieved = " 🎯 TARGET ACHIEVED!" if abs(state[0] - state[1]) < 0.5 else ""
                     timing_status = "EXACT" if timing_accurate else "LATE"
+                    
+                    # RNN 메모리 정보 (60초 전체 맥락)
+                    memory_sec = 60.0  # RNN은 60초 전체 맥락 사용
+                    state_dim = self.cfg["STATE_DIM"]
+                    
+                    # GPU 메모리 정보 추가
+                    gpu_info = ""
+                    if torch.cuda.is_available():
+                        allocated = torch.cuda.memory_allocated() / 1024**3  # GB
+                        reserved = torch.cuda.memory_reserved() / 1024**3     # GB
+                        gpu_info = f" | GPU: {allocated:.1f}GB/{reserved:.1f}GB"
+                    
+                    # 시스템 메모리 정보 추가
+                    memory = psutil.virtual_memory()
+                    sys_mem = f" | RAM: {memory.percent:.1f}%"
+                    
                     self._log("INFO", f"[에피 {ep+1}] 단계 {self.episode_step} | {mode} | "
                           f"F {state[0]:.1f}/{state[1]:.1f}N | "
                           f"PI {state[5]:.3f}MPa | RL {rl_residual:.3f}MPa | {timing_status} | "
-                          f"Time: {current_time - episode_start_time:.1f}s | "
-                          f"RL_Flag: {sander_active}{force_achieved}")
+                          f"RL_Flag: {sander_active} | "
+                          f"메모리: {memory_sec:.1f}s({state_dim}D){gpu_info}{sys_mem}{force_achieved}")
                     self.last_log_time = current_time
 
                 # B안: RNN용 상태 업데이트
@@ -2401,16 +2466,18 @@ if __name__ == "__main__":
     SEND_FREQUENCY_HZ = 100
     RECV_FREQUENCY_HZ = 1000
     config = create_config(SEND_FREQUENCY_HZ, RECV_FREQUENCY_HZ)
-    Logger.log("INFO", "🚀 B안: RNN 기반 방식 - JY_Pneumatic_SAC_Pre_only_3_main.py")
+    Logger.log("INFO", "🚀 B안: Stateful TBPTT RNN 방식 - JY_Pneumatic_SAC_Pre_only_3_main.py")
+    Logger.log("INFO", "🎮 RTX 5090 + AMD 라이젠 최적화 버전 (60초 전체 맥락)")
     Logger.log("INFO", f"⚡ 송신 주파수: {SEND_FREQUENCY_HZ}Hz (간격: {config['TICK_SEC']:.3f}초)")
     Logger.log("INFO", f"📡 수신 주파수: {RECV_FREQUENCY_HZ}Hz (간격: {config['RECV_INTERVAL_SEC']:.3f}초)")
     Logger.log("INFO", f"📊 B안 설정: STATE_DIM={config['STATE_DIM']} (원본 6차원)")
     Logger.log("INFO", f"🧠 RNN: {config['RNN_TYPE']} (은닉={config['RNN_HIDDEN']}, 레이어={config['RNN_LAYERS']})")
-    Logger.log("INFO", f"📏 시퀀스: 길이={config['SEQ_LEN']}, 워밍업={config['BURN_IN']}")
+    Logger.log("INFO", f"📏 Stateful TBPTT: SEQ_LEN={config['SEQ_LEN']}, BURN_IN={config['BURN_IN']} (60초 맥락)")
     Logger.log("INFO", f"🎛️ 액션 스무딩: β={config['ACTION_SMOOTH_BETA']}")
     Logger.log("INFO", f"⏱️ 에피소드 길이: {config['MAX_EPISODE_STEPS']} 스텝 ({config['MAX_EPISODE_STEPS'] * config['TICK_SEC']:.1f}초)")
-    Logger.log("INFO", f"🧠 메모리: RNN 은닉 상태로 장기 의존성 학습")
-    Logger.log("INFO", f"⚡ 최적화: 공압 relaxation 특성 학습을 위한 시계열 RNN")
+    Logger.log("INFO", f"🧠 메모리: RNN 은닉 상태로 60초 전체 맥락 유지")
+    Logger.log("INFO", f"⚡ 최적화: 공압 relaxation 특성 학습을 위한 stateful TBPTT")
+    Logger.log("INFO", f"🎮 GPU 최적화: HIDDEN={config['HIDDEN']}, BATCH={config['BATCH_SIZE']}, BUFFER={config.get('REPLAY_BUFFER_SIZE', 'N/A')}")
     Logger.log("INFO", "=" * 60)
     np.random.seed(42) 
     torch.manual_seed(42)
