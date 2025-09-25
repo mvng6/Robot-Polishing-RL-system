@@ -642,7 +642,7 @@ UINT CRobotCommSWDJv5Dlg::Thread_Servo(LPVOID pParam)
 			if (stopRobotWithError(_T("Fy 접촉력 초과로 인한 정지")))
 				break;
 		}
-		else if (abs(Th_sensorData_servo.filteredForce[2]) > 70.0)
+		else if (abs(Th_sensorData_servo.filteredForce[2]) > 85.0)
 		{
 			if (stopRobotWithError(_T("Fz 접촉력 초과로 인한 정지")))
 				break;
@@ -1371,7 +1371,7 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 	// ===============================================
 	// 실험 설정
 	g_pDlg->m_setting.Target_Force_N.store(-35.0f);				// 목표 접촉력 설정 (N)   [음수로 설정해줘야 로봇 베이스 좌표계와 동일한 방향]
-	g_pDlg->m_setting.Force_limit_N.store(70.0f);				// 접촉력 제한값 설정 (N)
+	g_pDlg->m_setting.Force_limit_N.store(85.0f);				// 접촉력 제한값 설정 (N)
 	g_pDlg->m_setting.Target_vz.store(5.0f);					// 목표 접촉 속도 설정 (mm/s) [양수로 설정해줘야 로봇 베이스 좌표계와 동일한 방향]
 	int Saturation_time = 5000;									// 접촉 유지 시간 설정 (ms)
 	g_pDlg->m_setting.First_Contact.store(true);
@@ -1421,8 +1421,8 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 	int RL_count = 0;
 
 	// 데이터 기록 시작
-	g_pDlg->m_flags.logThreadRunning.store(true);
-	g_pDlg->m_pThread_Logger = AfxBeginThread(Thread_Logger, g_pDlg);
+	//g_pDlg->m_flags.logThreadRunning.store(true);
+	//g_pDlg->m_pThread_Logger = AfxBeginThread(Thread_Logger, g_pDlg);
 
 	// ===============================================
 	// ✨ 추가된 코드: 메시지 수신 주기 측정을 위한 변수
@@ -1817,37 +1817,37 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 		//////////////////////////////////////////////////////////////////////////
 		////데이터 기록+++++++++++++++++++++++++++++++++++++++++++++++++++++
 		//////////////////////////////////////////////////////////////////////////		
-		t_stamp_ns = system_clock::now() - t_start;
+		/*t_stamp_ns = system_clock::now() - t_start;
 		t_stamp_ns_float = float(t_stamp_ns.count());
-		float t_stamp_ms_float = t_stamp_ns_float / 1000000.0f;
+		float t_stamp_ms_float = t_stamp_ns_float / 1000000.0f;*/
 
-		LogData log;
-		log.data.reserve(32); // 로그 데이터 크기 예약
+		//LogData log;
+		//log.data.reserve(32); // 로그 데이터 크기 예약
 
-		log.data.push_back(t_stamp_ms_float);
-		log.data.insert(log.data.end(), Th_robotData_flat.flangePos.begin(), Th_robotData_flat.flangePos.end());
-		log.data.insert(log.data.end(), Th_sensorData_flat.filteredForce.begin(), Th_sensorData_flat.filteredForce.end());
-		log.data.insert(log.data.end(), Th_sensorData_flat.filteredTorque.begin(), Th_sensorData_flat.filteredTorque.end());
+		//log.data.push_back(t_stamp_ms_float);
+		//log.data.insert(log.data.end(), Th_robotData_flat.flangePos.begin(), Th_robotData_flat.flangePos.end());
+		//log.data.insert(log.data.end(), Th_sensorData_flat.filteredForce.begin(), Th_sensorData_flat.filteredForce.end());
+		//log.data.insert(log.data.end(), Th_sensorData_flat.filteredTorque.begin(), Th_sensorData_flat.filteredTorque.end());
 
-		log.data.push_back(g_pDlg->m_setting.vz_mms);
-		log.data.push_back((float)g_pDlg->m_pidctrl.getLastError());
-		log.data.push_back((float)g_pDlg->m_airctrl.sendChamberPressure());
-		log.data.push_back((float)g_pDlg->m_airctrl.sendChamberVoltage());
-		log.data.push_back((float)g_pDlg->m_airctrl.sendSpindlePressure());
-		log.data.push_back((float)g_pDlg->m_airctrl.sendSpindleVoltage());
-		log.data.push_back((float)g_pDlg->m_airctrl.feedbackChamberPressure());
-		log.data.push_back((float)g_pDlg->m_airctrl.feedbackChamberVoltage());
-		log.data.push_back((float)g_pDlg->m_airctrl.feedbackSpindlePressure());
-		log.data.push_back((float)g_pDlg->m_airctrl.feedbackSpindleVoltage());
+		//log.data.push_back(g_pDlg->m_setting.vz_mms);
+		//log.data.push_back((float)g_pDlg->m_pidctrl.getLastError());
+		//log.data.push_back((float)g_pDlg->m_airctrl.sendChamberPressure());
+		//log.data.push_back((float)g_pDlg->m_airctrl.sendChamberVoltage());
+		//log.data.push_back((float)g_pDlg->m_airctrl.sendSpindlePressure());
+		//log.data.push_back((float)g_pDlg->m_airctrl.sendSpindleVoltage());
+		//log.data.push_back((float)g_pDlg->m_airctrl.feedbackChamberPressure());
+		//log.data.push_back((float)g_pDlg->m_airctrl.feedbackChamberVoltage());
+		//log.data.push_back((float)g_pDlg->m_airctrl.feedbackSpindlePressure());
+		//log.data.push_back((float)g_pDlg->m_airctrl.feedbackSpindleVoltage());
 
-        log.data.push_back((float)g_pDlg->m_received_RL_Pressure);
-		log.data.push_back(RL_confirm);
-		log.data.push_back(episode_ended);
-		{
-			std::lock_guard<std::mutex> lock(g_pDlg->m_logMutex);
-			g_pDlg->m_logQueue.push(log);
-		}
-		g_pDlg->m_logCv.notify_one();
+  //      log.data.push_back((float)g_pDlg->m_received_RL_Pressure);
+		//log.data.push_back(RL_confirm);
+		//log.data.push_back(episode_ended);
+		//{
+		//	std::lock_guard<std::mutex> lock(g_pDlg->m_logMutex);
+		//	g_pDlg->m_logQueue.push(log);
+		//}
+		//g_pDlg->m_logCv.notify_one();
 
 		////////////////////////////////////////////////////////////////////////////
 		//////while문 속도 제어+++++++++++++++++++++++++++++++++++++++++++++++++++++
