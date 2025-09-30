@@ -102,7 +102,10 @@ struct LogData {
 };
 
 struct TCPIP {
-	std::atomic<float> rl_pressure_from_server{ 0.0f };		// RL 에이전트로부터 수신된 공압 데이터
+	//std::atomic<float> rl_pressure_from_server{ 0.0f };		// RL 에이전트로부터 수신된 공압 데이터
+	std::atomic<float> rl_gain_p{ 0.0f };
+	std::atomic<float> rl_gain_i{ 0.0f };
+	std::atomic<float> rl_gain_d{ 0.0f };
 	std::atomic<bool> is_new_message_received{ false };		// RL 에이전트로부터 새로운 메세지 수신 여부
 	std::atomic<bool> episode_state_flag{ false };			// RL 에이전트로부터 에피소드 상태 수신 여부
 };
@@ -218,7 +221,10 @@ private:
 	std::mutex m_tcpMutex;									// TCP 데이터 보호용 뮤텍스
 
 	// Python으로부터 받은 값을 저장할 멤버 변수
-	std::atomic<float> m_received_RL_Pressure{ 0.0f };		// RL 잔차 압력 값 [MPa]
+	//std::atomic<float> m_received_RL_Pressure{ 0.0f };		// RL 잔차 압력 값 [MPa]
+	std::atomic<float> m_received_RL_P_Gain{ 0.0f };
+	std::atomic<float> m_received_RL_I_Gain{ 0.0f };
+	std::atomic<float> m_received_RL_D_Gain{ 0.0f };
 	std::atomic<bool> m_received_RL_Confirm_Flag{ false };	// RL 메시지 수신 플래그
 	std::atomic<bool> m_received_RL_Episode_Flag{ false };	// RL Episode Flag
 	std::atomic<bool> m_received_RL_End_Flag{ false };		// RL End Flag (강화학습 종료 플래그)
@@ -272,5 +278,7 @@ private:
 	double var_spindle_air_gui;								// 스핀들 압력 [MPa]
 	double var_spindle_volt_gui;							// 스핀들 전압 [V]
 
-	double var_RL_Pressure;									// 서버(RL 에이전트)로부터 받은 잔차 압력 값 [MPa]
+	double var_gain_p_gui;
+	double var_gain_i_gui;
+	double var_gain_d_gui;
 };

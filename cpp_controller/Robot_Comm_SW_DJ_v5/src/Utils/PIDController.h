@@ -21,6 +21,7 @@ public:
 		double maxOutput = +1.0) noexcept;                                      // PID 출력 최대 한계 초기화
 
 	void setGains(double kp, double ki, double kd) noexcept;                    // PID 게인 설정 함수
+	void getGains(double& kp, double& ki, double& kd) const noexcept;			// PID 게인 읽는 함수
 	void setOutputLimits(double minOutput, double maxOutput) noexcept;          // PID 출력 한계 설정 함수
 
 	Result calculate(                                                           // PID 계산 함수                                                       

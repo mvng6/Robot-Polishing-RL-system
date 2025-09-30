@@ -81,9 +81,20 @@ bool UnpackRLAgentCommand(const char* buffer, int length, RLAgentPacket& outPack
 	// 2. 바이트 순서 변환 (Network to Host)
 	outPacket.sof = ntohs(received_packet.sof);
 
-	float rl_Pressure = received_packet.RL_ResidualP;
+	/*float rl_Pressure = received_packet.RL_ResidualP;
 	*(unsigned long*)&rl_Pressure = ntohl(*(unsigned long*)&rl_Pressure);
-	outPacket.RL_ResidualP = rl_Pressure;
+	outPacket.RL_ResidualP = rl_Pressure;*/
+
+	float rl_gain_P = received_packet.RL_gain_P;
+	*(unsigned long*)&rl_gain_P = ntohl(*(unsigned long*)&rl_gain_P);
+	float rl_gain_I = received_packet.RL_gain_I;
+	*(unsigned long*)&rl_gain_I = ntohl(*(unsigned long*)&rl_gain_I);
+	float rl_gain_D = received_packet.RL_gain_D;
+	*(unsigned long*)&rl_gain_D = ntohl(*(unsigned long*)&rl_gain_D);
+
+	outPacket.RL_gain_P = rl_gain_P;
+	outPacket.RL_gain_I = rl_gain_I;
+	outPacket.RL_gain_D = rl_gain_D;
 
 	outPacket.RL_MessagerecvFlag = received_packet.RL_MessagerecvFlag;
 	outPacket.RL_EpisodeFlag = received_packet.RL_EpisodeFlag;

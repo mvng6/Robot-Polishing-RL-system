@@ -18,7 +18,11 @@ void PIDController::setGains(double kp, double ki, double kd) noexcept {
 	m_ki = ki;
 	m_kd = kd;
 }
-
+void PIDController::getGains(double& kp, double& ki, double& kd) const noexcept {
+	kp = m_kp;
+	ki = m_ki;
+	kd = m_kd;
+}
 void PIDController::setOutputLimits(double minOutput, double maxOutput) noexcept {
 	m_minOutput = minOutput;
 	m_maxOutput = maxOutput;

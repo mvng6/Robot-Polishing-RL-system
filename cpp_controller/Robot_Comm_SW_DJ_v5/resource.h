@@ -94,6 +94,10 @@
 #define IDC_BUT_HOME_INIT_TCP           1052
 #define IDC_VAR_CHAMBER_AIR2            1052
 #define IDC_VAR_RESIDUAL_PRESSURE       1052
+#define IDC_VAR_GAIN_P                  1053
+#define IDC_VAR_GAIN_I                  1054
+#define IDC_VAR_GAIN_I2                 1055
+#define IDC_VAR_GAIN_D                  1055
 
 // Next default values for new objects
 // 
