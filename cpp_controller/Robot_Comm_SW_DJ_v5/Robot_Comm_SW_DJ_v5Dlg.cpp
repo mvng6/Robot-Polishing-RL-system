@@ -1473,12 +1473,19 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 
 			if (episode_ended)
 			{
+				// ====================================
+				// 코드 수정 필요 부분
+				// Target force 고정
+				// PID 게인값은 RL PC에서 보내는 값으로 치환
+				// PID 수신 패킷 및 순서 수정
+
 				std::random_device rd;
 				std::mt19937 gen(rd());
 				std::uniform_int_distribution<> dist(35, 50);
 				int random_force = dist(gen);
 
 				g_pDlg->m_setting.Target_Force_N.store(-1.0f * random_force);
+				// ====================================
 
 				RL_count = 0;
 				g_pDlg->m_received_RL_Episode_Flag.store(false);
