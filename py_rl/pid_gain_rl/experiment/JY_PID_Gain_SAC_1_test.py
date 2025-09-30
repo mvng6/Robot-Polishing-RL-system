@@ -1,4 +1,4 @@
-# Residual SAC Agent for Pneumatic Polishing System
+# PID Gain Optimization SAC Agent for Pneumatic Polishing System
 
 import os
 import random
@@ -67,40 +67,36 @@ class DataSaver:
         Logger.log("INFO", "✅ 데이터 저장 완료!")
 
 # =========================
-# CONSTANTS
+# PID GAIN 최적화 상수
 # =========================
-# 상수 정의
 class Constants:
     # =========================
-    # 네트워크 관련 상수
+    # 신경망 관련 상수
     # =========================
     DEFAULT_HIDDEN_DIM = 256          # 신경망 은닉층 크기 (Actor/Critic 공통)
-    DEFAULT_LR = 1e-3                 # 학습률 (Learning Rate) - 옵티마이저 업데이트 크기
-    DEFAULT_GAMMA = 0.99              # 할인 인수 - 미래 보상의 현재 가치 비율
-    DEFAULT_TAU = 0.005               # 소프트 업데이트 계수 - 타겟 네트워크 업데이트 속도
+    DEFAULT_LR = 3e-4                 # 학습률 (PID 최적화에 최적화)
+    DEFAULT_GAMMA = 0.99              # 할인 인수 (한 스텝 MDP이므로 영향 없음)
+    DEFAULT_TAU = 0.01                # 소프트 업데이트 계수 (PID 최적화에 최적화)
     
     # =========================
-    # 액션 관련 상수
+    # PID Gain 관련 상수
     # =========================
-    DEFAULT_R_MIN = -0.05             # 최소 잔여 압력 (MPa) - 공압 딜레이 고려
-    DEFAULT_R_MAX = 0.05              # 최대 잔여 압력 (MPa) - 공압 딜레이 고려
+    DEFAULT_PID_RANGE = {"Kp": (56.0, 104.0), "Ki": (91.0, 169.0), "Kd": (0.0, 15.0)}  # PID gain 범위 (기준값 P=80, I=130, D=0 중심 ±30%)
     
     # =========================
     # 주파수 관련 상수
     # =========================
-    DEFAULT_SEND_FREQ = 100           # 송신 주파수 (Hz) - 로봇 제어 PC로 명령 전송
     DEFAULT_RECV_FREQ = 1000          # 수신 주파수 (Hz) - 로봇 제어 PC에서 상태 수신
-    DEFAULT_TICK_TOL = 0.005          # 송신 주기 허용 오차 (초) - 100Hz에서 5ms
     
     # =========================
-    # 학습 관련 상수
+    # PID 최적화 학습 관련 상수
     # =========================
     DEFAULT_BATCH_SIZE = 128          # 배치 크기 - 한 번에 학습할 경험 개수
-    DEFAULT_REPLAY_WARMUP = 10000     # 리플레이 버퍼 워밍업 - 학습 시작 전 최소 경험 수 (30초간 데이터)
-    DEFAULT_UPDATE_FREQ = 10          # 네트워크 업데이트 주기 (Hz) - 1초에 10번 학습
+    # 워밍업 에피소드 제거 - 첫 에피소드에서 기준값 사용 후 바로 강화학습 시작
     DEFAULT_EPISODES = 250            # 총 에피소드 수 - 전체 학습 횟수
-    DEFAULT_MAX_STEPS = 3000          # 에피소드당 최대 스텝 수 - 한 에피소드 최대 길이
-    DEFAULT_HER_SAMPLES = 12          # HER 샘플 수 - 실패한 경험을 재활용하는 개수
+    DEFAULT_EPISODE_SECONDS = 15.0    # 에피소드 길이 (초) - PID gain 최적화용
+    DEFAULT_TARGET_FORCE = 45.0       # 목표 힘 (N) - 고정값
+    DEFAULT_UPDATES_PER_EPISODE = 16 # 에피소드당 업데이트 횟수 (과적합 방지)
     
     # =========================
     # 네트워킹 관련 상수
@@ -116,66 +112,63 @@ class Constants:
     # 메모리 관련 상수
     # =========================
     DEFAULT_MAX_REWARDS_HISTORY = 1000        # 최대 보상 기록 수 - 메모리 절약을 위한 제한
-    DEFAULT_REPLAY_BUFFER_SIZE = 2000000      # 리플레이 버퍼 크기 - 저장할 경험의 최대 개수
+    DEFAULT_REPLAY_BUFFER_SIZE = 2000         # 리플레이 버퍼 크기 - PID 최적화용 (에피소드당 1개 transition, 250개 에피소드 × 8배)
     
     # =========================
     # 경로 관련 상수
     # =========================
-    DEFAULT_MODEL_SAVE_DIR = "/home/katech/Robot-Polishing-RL-system/py_rl/saved_agents"  # 모델 저장 경로
-    DEFAULT_LOG_DIR = "/home/katech/Robot-Polishing-RL-system/py_rl/experiment_logs"      # 로그 저장 경로
+    DEFAULT_MODEL_SAVE_DIR = "/home/katech/Robot-Polishing-RL-system/py_rl/pid_gain_rl/saved_agents"  # 모델 저장 경로
+    DEFAULT_LOG_DIR = "/home/katech/Robot-Polishing-RL-system/py_rl/pid_gain_rl/experiment_logs"      # 로그 저장 경로
     
     # =========================
     # 기타 상수
     # =========================
-    WAIT_MESSAGE_INTERVAL = 0.04      # 대기 메시지 출력 간격 (초) - 상태 표시 주기
+    WAIT_MESSAGE_INTERVAL = 1.0       # 대기 메시지 출력 간격 (초) - PID 최적화용
     DEFAULT_FORCE_VALUE = -30.0       # 기본 힘 값 (N) - 데이터 없을 때 사용
-    MAX_RETRIES = 3                   # 최대 재시도 횟수 - 일반적인 재시도 제한
-    SUCCESS_REWARD = 10.0             # 성공 보상 - 목표 달성 시 추가 보상
-    BAND_TOLERANCE = 5.0              # 밴드 허용 오차 (N) - 목표 힘 주변 허용 범위
     
     # =========================
-    # 보상함수 관련 상수
+    # PID 최적화 보상 관련 상수
     # =========================
-    # 보상 가중치 (수렴>유지>안정성 순서로 중요도)
-    REWARD_WEIGHT_PROGRESS = 2.0      # 진행도 가중치 - 목표에 가까워지는 정도
-    REWARD_WEIGHT_BAND = 0.6          # 밴드 내 유지 가중치 - 허용 범위 내에 있는 정도
-    REWARD_WEIGHT_STICK = 0.6         # 연속 밴드 유지 가중치 - 밴드 내에서 계속 유지
-    REWARD_WEIGHT_EDOT = 0.02         # 힘 변화율 페널티 가중치 - 힘의 급격한 변화 방지
-    REWARD_WEIGHT_DU = 0.04           # 액션 변화 페널티 가중치 - 액션의 급격한 변화 방지
+    # PID 최적화 보상 가중치
+    REWARD_WEIGHT_RMSE = 1.0          # RMSE 가중치 - 제어 정확도
+    REWARD_WEIGHT_OVERSHOOT = 0.06    # 오버슈트 가중치 - 과도한 응답 방지
+    REWARD_WEIGHT_SETTLING = 0.6      # 정착시간 가중치 - 빠른 수렴
+    REWARD_WEIGHT_EFFORT = 0.02       # 제어 노력 가중치 - PID gain 크기
+    REWARD_WEIGHT_VARIANCE = 0.5      # 오차 분산 가중치 - 안정성
+    REWARD_WEIGHT_OUT_OF_BAND = 2.0   # 밴드 이탈 시간 가중치 - 범위 밖 시간
+    REWARD_WEIGHT_BAND = 10.0         # 밴드 유지 가중치 - 목표 범위 유지
     
-    # 보상 범위 및 임계값
-    REWARD_MIN = -15.0                # 최소 보상값 - 보상 하한선 (안정성)
-    REWARD_MAX = 15.0                 # 최대 보상값 - 보상 상한선 (안정성)
-    TAU_REQUIRED_SECONDS = 10         # 밴드 유지 요구 시간 (초) - 성공 판정 기준
+    # 보상 범위
+    REWARD_MIN = -100.0               # 최소 보상값 (안전 위반 시)
+    REWARD_MAX = 50.0                 # 최대 보상값 (완벽한 제어 시)
     
-    # 밴드 관련 상수
+    # 제어 성능 임계값
     BAND_TOLERANCE_N = 5.0            # 밴드 허용 오차 (N) - 목표 힘 ±5N 범위
-    BAND_SUCCESS_MESSAGE = "🎯 ±{:.1f}N 밴드 내 {:.1f}s 유지 성공"  # 성공 메시지 템플릿
+    SAFETY_FORCE_LIMIT = 100.0        # 안전 힘 제한 (N)
 
 # =========================
-# CONFIG
+# PID GAIN 최적화 설정
 # =========================
-# 기본 설정
 _BASE_CONFIG = {
     # Neural Network
-    "STATE_DIM": 6,
-    "ACTION_DIM": 1,
+    "STATE_DIM": 12,  # [0-5: 로봇제어PC 전송, 6-11: 강화학습PC 계산]
+    "ACTION_DIM": 3,  # [Kp, Ki, Kd]
     "HIDDEN": Constants.DEFAULT_HIDDEN_DIM,
     "LR": Constants.DEFAULT_LR,
     "GAMMA": Constants.DEFAULT_GAMMA,
     "TAU": Constants.DEFAULT_TAU,
     "AUTO_ENTROPY": True,
-    # Residual limits (MPa) - 공압 딜레이 고려하여 범위 축소
-    "R_MIN": Constants.DEFAULT_R_MIN,
-    "R_MAX": Constants.DEFAULT_R_MAX,
-    # Scheduling - 송신/수신 주파수 설정
-    "SEND_FREQ_HZ": Constants.DEFAULT_SEND_FREQ,  # 송신 주파수 (Hz)
-    "RECV_FREQ_HZ": Constants.DEFAULT_RECV_FREQ,  # 수신 주파수 (Hz) - 로봇 제어 PC에서 받는 주파수
-    "TICK_TOL": Constants.DEFAULT_TICK_TOL,  # 🚀 수정: 100Hz에서 5ms 허용오차 (기존 20ms → 5ms)
+    # PID Gain 범위
+    "PID_RANGE": Constants.DEFAULT_PID_RANGE,
+    # 에피소드 설정
+    "EPISODE_SECONDS": Constants.DEFAULT_EPISODE_SECONDS,
+    "TARGET_FORCE": Constants.DEFAULT_TARGET_FORCE,
+    # 워밍업 에피소드 제거
+    "UPDATES_PER_EPISODE": Constants.DEFAULT_UPDATES_PER_EPISODE,
+    # 수신 주파수 (PID gain은 에피소드당 한 번만 전송)
+    "RECV_FREQ_HZ": Constants.DEFAULT_RECV_FREQ,
     # Training
     "BATCH_SIZE": Constants.DEFAULT_BATCH_SIZE,
-    "REPLAY_WARMUP": Constants.DEFAULT_REPLAY_WARMUP,
-    "UPDATE_FREQ_HZ": Constants.DEFAULT_UPDATE_FREQ,
     # Networking
     "HOST": Constants.DEFAULT_HOST,
     "PORT": Constants.DEFAULT_PORT,
@@ -185,35 +178,24 @@ _BASE_CONFIG = {
     "COMM_RETRY_DELAY": Constants.DEFAULT_COMM_RETRY_DELAY,
     # Episode
     "EPISODES": Constants.DEFAULT_EPISODES,
-    "MAX_EPISODE_STEPS": Constants.DEFAULT_MAX_STEPS,
     # Model saving
     "MODEL_SAVE_DIR": Constants.DEFAULT_MODEL_SAVE_DIR,
     # Logging paths
     "LOG_DIR": Constants.DEFAULT_LOG_DIR,
     # Memory management
     "MAX_EPISODE_REWARDS_HISTORY": Constants.DEFAULT_MAX_REWARDS_HISTORY,
-    # HER settings
-    "HER_SAMPLES": Constants.DEFAULT_HER_SAMPLES,  # HER 샘플 개수
+    "REPLAY_BUFFER_SIZE": Constants.DEFAULT_REPLAY_BUFFER_SIZE,
 }
 
-def create_config(send_freq_hz=None, recv_freq_hz=None):
-    """송신/수신 주파수를 기반으로 CONFIG 생성"""
+def create_config(recv_freq_hz=None):
+    """수신 주파수를 기반으로 CONFIG 생성 (PID gain 최적화용)"""
     config = _BASE_CONFIG.copy()
-    
-    if send_freq_hz is not None:
-        if send_freq_hz <= 0 or send_freq_hz > 1000:
-            raise ValueError(f"송신 주파수는 0과 1000 사이여야 합니다: {send_freq_hz}")
-        config["SEND_FREQ_HZ"] = send_freq_hz
     
     if recv_freq_hz is not None:
         if recv_freq_hz <= 0 or recv_freq_hz > 10000:
             raise ValueError(f"수신 주파수는 0과 10000 사이여야 합니다: {recv_freq_hz}")
         config["RECV_FREQ_HZ"] = recv_freq_hz
     
-    if config["RECV_FREQ_HZ"] < config["SEND_FREQ_HZ"]:
-        raise ValueError(f"수신 주파수({config['RECV_FREQ_HZ']}Hz)는 송신 주파수({config['SEND_FREQ_HZ']}Hz)보다 높거나 같아야 합니다")
-    
-    config["TICK_SEC"] = 1.0 / config["SEND_FREQ_HZ"]
     config["RECV_INTERVAL_SEC"] = 1.0 / config["RECV_FREQ_HZ"]
     return config
 
@@ -221,21 +203,234 @@ def create_config(send_freq_hz=None, recv_freq_hz=None):
 CONFIG = create_config()
 
 # =========================
+# PID Gain Utilities
+# =========================
+def scale_action_to_pid(action, pid_range):
+    """
+    Actor 출력 [-1, 1]^3을 실제 PID gain 범위로 스케일링
+    Args:
+        action: Actor 출력 [Kp, Ki, Kd] ∈ [-1, 1]^3
+        pid_range: PID 범위 딕셔너리 {"Kp": (min, max), "Ki": (min, max), "Kd": (min, max)}
+    Returns:
+        pid_gains: 실제 PID gain 값들 [Kp, Ki, Kd]
+    """
+    def scale_single(v, lo, hi):
+        return lo + (v + 1.0) * 0.5 * (hi - lo)
+    
+    return np.array([
+        scale_single(action[0], *pid_range["Kp"]),
+        scale_single(action[1], *pid_range["Ki"]),
+        scale_single(action[2], *pid_range["Kd"]),
+    ], dtype=np.float32)
+
+def create_initial_state(force_data, target_force=45.0, previous_pid_gains=None, historical_errors=None, episode_history=None):
+    """
+    초기 상태 벡터 생성 (12차원) - 이전 5개 에피소드 성능 정보 활용
+    Args:
+        force_data: 최근 힘 데이터 리스트
+        target_force: 목표 힘 (기본 45N)
+        previous_pid_gains: 이전 에피소드의 PID gain [Kp, Ki, Kd]
+        historical_errors: 이전 에피소드들의 에러 통계
+        episode_history: 이전 5개 에피소드의 (PID, 성능) 기록
+    Returns:
+        state: 12차원 상태 벡터
+    """
+    if not force_data:
+        if previous_pid_gains is not None:
+            # 이전 PID gain으로 추정된 상태 사용
+            print(f"⚠️  [데이터 없음] 이전 에피소드 PID 사용: Kp={previous_pid_gains[0]:.2f}, Ki={previous_pid_gains[1]:.2f}, Kd={previous_pid_gains[2]:.2f}")
+            return _estimate_state_from_previous_pid(previous_pid_gains, target_force, historical_errors, episode_history)
+        else:
+            # 첫 에피소드인 경우 기본값
+            print("🆕 [첫 에피소드] 기본 상태로 시작 (데이터 없음)")
+            return np.array([
+                target_force,  # current_force
+                target_force,  # target_force
+                0.0,          # error
+                0.0,          # error_dot
+                0.0,          # error_int
+                0.0,          # pi_output
+                0.0,          # recent_error_avg
+                0.0,          # recent_error_std
+                0.0,          # performance_trend (성능 트렌드)
+                0.0,          # avg_recent_performance (평균 성능)
+                0.0,          # pid_variance (PID 변화 분산)
+                0.0           # episode_count (에피소드 수)
+            ], dtype=np.float32)
+    
+    # ✅ 리스트 → 넘파이 변환
+    force_arr = np.asarray(force_data, dtype=np.float32)
+    
+    current_force = force_arr[-1]
+    error = current_force - target_force
+    
+    # 에피소드 시작 시점에서는 현재까지의 모든 데이터로 통계 계산
+    # (에피소드가 진행되면서 점진적으로 데이터가 쌓임)
+    all_errors = force_arr - target_force
+    
+    # 현재 시점까지의 에러 통계 계산
+    if all_errors.size > 0:
+        recent_error_avg = float(np.mean(np.abs(all_errors)))
+        recent_error_std = float(np.std(all_errors)) if all_errors.size > 1 else 0.0
+    else:
+        # 데이터가 없는 경우 (거의 발생하지 않음)
+        recent_error_avg = 0.0
+        recent_error_std = 0.0
+    
+    # error_dot과 error_int는 실제 데이터에서 계산
+    if force_arr.size >= 2:
+        error_dot = float((force_arr[-1] - force_arr[-2]) / 0.001)  # 1kHz 기준
+    else:
+        error_dot = 0.0
+    
+    # error_int는 간단한 누적 (실제로는 더 정교한 계산 필요)
+    error_int = float(np.sum(np.abs(all_errors)) * 0.001)  # 1kHz 기준
+    
+    # 실제 데이터 사용 로그
+    # print(f"✅ [실제 데이터] Force={current_force:.2f}N, Error={error:.2f}N, DataPoints={len(force_data)}")  # 간소화
+    
+    # 이전 에피소드 히스토리 분석 (실제 데이터가 있을 때)
+    performance_trend = 0.0
+    avg_recent_performance = 0.0
+    pid_variance = 0.0
+    episode_count = 0.0
+    
+    if episode_history is not None and len(episode_history) > 0:
+        recent_rewards = [ep['reward'] for ep in episode_history[-5:]]  # 최근 5개
+        recent_pids = [ep['pid_gains'] for ep in episode_history[-5:]]
+        
+        if len(recent_rewards) >= 2:
+            performance_trend = recent_rewards[-1] - recent_rewards[-2]
+            avg_recent_performance = np.mean(recent_rewards)
+        
+        if len(recent_pids) >= 2:
+            pid_changes = np.array(recent_pids[-1]) - np.array(recent_pids[-2])
+            pid_variance = np.var(pid_changes)
+        
+        episode_count = len(episode_history)
+    
+    return np.array([
+        # === 로봇제어PC에서 전송받은 데이터 (0-5) ===
+        current_force,      # 0: current_force (로봇제어PC 전송)
+        target_force,       # 1: target_force (로봇제어PC 전송)
+        error,              # 2: error (로봇제어PC 전송)
+        error_dot,          # 3: error_dot (로봇제어PC 전송)
+        error_int,          # 4: error_int (로봇제어PC 전송)
+        0.0,                # 5: pi_output (로봇제어PC 전송, 현재는 0)
+        
+        # === 강화학습PC에서 계산한 데이터 (6-11) ===
+        recent_error_avg,   # 6: recent_error_avg (강화학습PC 계산)
+        recent_error_std,   # 7: recent_error_std (강화학습PC 계산)
+        performance_trend,  # 8: performance_trend (강화학습PC 계산)
+        avg_recent_performance,  # 9: avg_recent_performance (강화학습PC 계산)
+        pid_variance,       # 10: pid_variance (강화학습PC 계산)
+        episode_count       # 11: episode_count (강화학습PC 계산)
+    ], dtype=np.float32)
+
+
+def _estimate_state_from_previous_pid(previous_pid_gains, target_force, historical_errors=None, episode_history=None):
+    """
+    이전 5개 에피소드 성능 정보를 활용한 초기 상태 추정
+    """
+    Kp, Ki, Kd = previous_pid_gains
+    
+    # 이전 5개 에피소드의 성능 분석
+    if episode_history is not None and len(episode_history) > 0:
+        # 최근 5개 에피소드의 성능 트렌드 분석
+        recent_rewards = [ep['reward'] for ep in episode_history[-5:]]
+        recent_pids = [ep['pid_gains'] for ep in episode_history[-5:]]
+        
+        # 성능 트렌드 계산 (개선/악화)
+        if len(recent_rewards) >= 2:
+            performance_trend = recent_rewards[-1] - recent_rewards[-2]  # 최근 변화
+            avg_recent_performance = np.mean(recent_rewards)
+        else:
+            performance_trend = 0.0
+            avg_recent_performance = recent_rewards[0] if recent_rewards else 0.0
+        
+        # PID gain 변화 패턴 분석
+        if len(recent_pids) >= 2:
+            pid_changes = np.array(recent_pids[-1]) - np.array(recent_pids[-2])
+        else:
+            pid_changes = np.array([0.0, 0.0, 0.0])
+        
+        # print(f"📊 [성능 분석] 최근 5개 에피소드 성능: {avg_recent_performance:.2f}, 트렌드: {performance_trend:+.2f}")  # 간소화
+        # print(f"📈 [PID 변화] 최근 5개 에피소드: Kp: {pid_changes[0]:+.2f}, Ki: {pid_changes[1]:+.2f}, Kd: {pid_changes[2]:+.2f}")  # 간소화
+        
+        # PID 변화 분산 계산
+        pid_variance = np.var(pid_changes)
+        episode_count = len(episode_history)
+        
+        # 성능 기반 에러 추정
+        if avg_recent_performance > 0:
+            # 좋은 성능이면 에러가 작을 것으로 추정
+            avg_error = -target_force * 0.05  # 작은 에러
+            error_std = target_force * 0.02
+        else:
+            # 나쁜 성능이면 에러가 클 것으로 추정
+            avg_error = -target_force * 0.15  # 큰 에러
+            error_std = target_force * 0.08
+    else:
+        # 히스토리가 없는 경우 기본 추정
+        avg_error = -target_force * 0.1
+        error_std = target_force * 0.05
+        performance_trend = 0.0
+        avg_recent_performance = 0.0
+        pid_variance = 0.0
+        episode_count = 0.0
+    
+    # 추정된 현재 힘
+    estimated_force = target_force + avg_error
+    
+    return np.array([
+        estimated_force,    # current_force
+        target_force,       # target_force
+        avg_error,          # error
+        0.0,                # error_dot (추정 어려움)
+        0.0,                # error_int (추정 어려움)
+        0.0,                # pi_output
+        abs(avg_error),     # recent_error_avg
+        error_std,          # recent_error_std
+        performance_trend,  # performance_trend (성능 트렌드)
+        avg_recent_performance,  # avg_recent_performance (평균 성능)
+        pid_variance,       # pid_variance (PID 변화 분산)
+        episode_count       # episode_count (에피소드 수)
+    ], dtype=np.float32)
+
+# =========================
 # SAC Models
 # =========================
 class Actor(nn.Module):
+    """최적화된 Actor 네트워크 - PID gain 출력용"""
     def __init__(self, state_dim, action_dim, hidden_dim=256, log_std_min=-20, log_std_max=2):
         super().__init__()
         self.log_std_min = log_std_min
         self.log_std_max = log_std_max
+        
+        # 최적화된 간단한 MLP 구조
         self.fc1 = nn.Linear(state_dim, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc3 = nn.Linear(hidden_dim, hidden_dim)  # 추가 레이어로 표현력 향상
+        
+        # PID gain 출력 헤드 (Kp, Ki, Kd)
         self.mean_head = nn.Linear(hidden_dim, action_dim)
         self.log_std_head = nn.Linear(hidden_dim, action_dim)
+        
+        # 가중치 초기화
+        self._init_weights()
+
+    def _init_weights(self):
+        """최적화된 가중치 초기화"""
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
 
     def forward(self, state):
         x = F.relu(self.fc1(state))
         x = F.relu(self.fc2(x))
+        x = F.relu(self.fc3(x))  # 추가 레이어
         mean = self.mean_head(x)
         log_std = torch.clamp(self.log_std_head(x), self.log_std_min, self.log_std_max)
         return mean, log_std
@@ -245,36 +440,63 @@ class Actor(nn.Module):
         std = log_std.exp()
         normal = torch.distributions.Normal(mean, std)
         x_t = normal.rsample()
-        action = torch.tanh(x_t)
+        action = torch.tanh(x_t)  # [-1, 1] 범위로 정규화
         log_prob = normal.log_prob(x_t) - torch.log(1 - action.pow(2) + 1e-6)
         log_prob_sum = log_prob.sum(1, keepdim=True)
         return action, log_prob_sum
     
 class Critic(nn.Module):
+    """최적화된 Critic 네트워크 - PID gain 평가용"""
     def __init__(self, state_dim, action_dim, hidden_dim=256):
         super().__init__()
+        
+        # Q1 네트워크
         self.q1_fc1 = nn.Linear(state_dim + action_dim, hidden_dim)
         self.q1_fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.q1_fc3 = nn.Linear(hidden_dim, 1)
+        self.q1_fc3 = nn.Linear(hidden_dim, hidden_dim)  # 추가 레이어
+        self.q1_fc4 = nn.Linear(hidden_dim, 1)
+        
+        # Q2 네트워크 (Twin Delayed DDPG)
         self.q2_fc1 = nn.Linear(state_dim + action_dim, hidden_dim)
         self.q2_fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.q2_fc3 = nn.Linear(hidden_dim, 1)
+        self.q2_fc3 = nn.Linear(hidden_dim, hidden_dim)  # 추가 레이어
+        self.q2_fc4 = nn.Linear(hidden_dim, 1)
+        
+        # 가중치 초기화
+        self._init_weights()
+
+    def _init_weights(self):
+        """최적화된 가중치 초기화"""
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
 
     def forward(self, state, action):
         sa = torch.cat([state, action], 1)
+        
+        # Q1 네트워크
         q1 = F.relu(self.q1_fc1(sa))
         q1 = F.relu(self.q1_fc2(q1))
-        q1 = self.q1_fc3(q1)
+        q1 = F.relu(self.q1_fc3(q1))  # 추가 레이어
+        q1 = self.q1_fc4(q1)
+        
+        # Q2 네트워크
         q2 = F.relu(self.q2_fc1(sa))
         q2 = F.relu(self.q2_fc2(q2))
-        q2 = self.q2_fc3(q2)
+        q2 = F.relu(self.q2_fc3(q2))  # 추가 레이어
+        q2 = self.q2_fc4(q2)
+        
         return q1, q2
 
 # =========================
 # Replay Buffer
 # =========================    
 class ReplayBuffer:
-    def __init__(self, capacity=Constants.DEFAULT_REPLAY_BUFFER_SIZE):
+    def __init__(self, capacity=None):
+        if capacity is None:
+            capacity = Constants.DEFAULT_REPLAY_BUFFER_SIZE
         self.buffer = deque(maxlen=capacity)
 
     def push(self, state, action, reward, next_state, done):
@@ -290,10 +512,1049 @@ class ReplayBuffer:
     def __len__(self):
         return len(self.buffer)
 
-# ==== ADDED: Control Performance Logger ====
+# =========================
+# MAIN LOGIC CLASSES
+# =========================
+
+class PIDGainSACAgent:
+    """
+    PID Gain 최적화를 위한 SAC 에이전트
+    - 에피소드당 한 번 PID gain 선택
+    - 12차원 상태 벡터 처리
+    - One-step MDP 학습
+    """
+    def __init__(self, cfg=None):
+        if cfg is None:
+            raise ValueError("cfg 파라미터가 필요합니다")
+        self.cfg = cfg
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        s_dim, a_dim, hidden = cfg["STATE_DIM"], cfg["ACTION_DIM"], cfg["HIDDEN"]
+        self.gamma, self.tau = cfg["GAMMA"], cfg["TAU"]
+        self.alpha = 0.05
+        self.auto_entropy_tuning = cfg["AUTO_ENTROPY"]
+        self.actor = Actor(s_dim, a_dim, hidden).to(self.device)
+        self.critic = Critic(s_dim, a_dim, hidden).to(self.device)
+        self.critic_target = Critic(s_dim, a_dim, hidden).to(self.device)
+        self.critic_target.load_state_dict(self.critic.state_dict())
+        self.actor_opt = optim.Adam(self.actor.parameters(), lr=cfg["LR"])
+        self.critic_opt = optim.Adam(self.critic.parameters(), lr=cfg["LR"])
+        if self.auto_entropy_tuning:
+            self.target_entropy = -torch.prod(torch.tensor([a_dim], device=self.device)).item()
+            self.log_alpha = torch.zeros(1, requires_grad=True, device=self.device)
+            self.alpha_opt = optim.Adam([self.log_alpha], lr=cfg["LR"])
+        self.replay = ReplayBuffer(cfg.get("REPLAY_BUFFER_SIZE", Constants.DEFAULT_REPLAY_BUFFER_SIZE))
+        self.total_steps = 0
+        self.episode_rewards = []
+        self.max_rewards_history = cfg.get("MAX_EPISODE_REWARDS_HISTORY", Constants.DEFAULT_MAX_REWARDS_HISTORY)
+
+    def select_action(self, state, evaluate=False):
+        """
+        PID gain 액션 선택 (에피소드당 한 번)
+        Args:
+            state: 12차원 상태 벡터 [0-5: 로봇제어PC 전송, 6-11: 강화학습PC 계산]
+            evaluate: 평가 모드 여부
+        Returns:
+            pid_gains: [Kp, Ki, Kd] 실제 PID gain 값들
+            log_prob: 로그 확률 (학습용)
+        """
+        state = torch.FloatTensor(state.reshape(1, -1)).to(self.device)
+        with torch.no_grad():
+            if evaluate:
+                mean, _ = self.actor(state)
+                action = torch.tanh(mean)
+                log_prob = None
+            else:
+                action, log_prob = self.actor.sample(state)
+        
+        action_np = action.cpu().numpy().flatten()
+        pid_gains = scale_action_to_pid(action_np, self.cfg["PID_RANGE"])
+        
+        if log_prob is not None:
+            log_prob = log_prob.cpu().numpy()
+            return pid_gains, log_prob
+        else:
+            return pid_gains, None
+    
+    def store_transition(self, state, action, reward, next_state, done):
+        """
+        PID gain transition 저장 (에피소드당 한 개)
+        Args:
+            state: 초기 상태 (12차원) [0-5: 로봇제어PC 전송, 6-11: 강화학습PC 계산]
+            action: PID gain 액션 [Kp, Ki, Kd]
+            reward: 에피소드 총보상
+            next_state: 최종 상태 (요약 또는 zero)
+            done: 에피소드 종료 여부 (항상 True)
+        """
+        # PID gain을 [-1, 1] 범위로 정규화
+        norm_action = self._normalize_pid_action(action)
+        self.replay.push(state, norm_action, reward, next_state, done)
+
+    def _normalize_pid_action(self, pid_action):
+        """PID gain을 [-1, 1] 범위로 정규화"""
+        def normalize_single(v, lo, hi):
+            return 2.0 * (v - lo) / (hi - lo) - 1.0
+        
+        return np.array([
+            normalize_single(pid_action[0], *self.cfg["PID_RANGE"]["Kp"]),
+            normalize_single(pid_action[1], *self.cfg["PID_RANGE"]["Ki"]),
+            normalize_single(pid_action[2], *self.cfg["PID_RANGE"]["Kd"]),
+        ], dtype=np.float32)
+
+    def update_parameters_one_step(self, batch_size=None, num_updates=128):
+        """
+        한 스텝 MDP에 최적화된 SAC 업데이트
+        Args:
+            batch_size: 배치 크기
+            num_updates: 업데이트 횟수
+        """
+        bs = batch_size or self.cfg["BATCH_SIZE"]
+        if len(self.replay) < bs: 
+            return
+
+        for _ in range(num_updates):
+            s, a, r, ns, d = self.replay.sample(bs)
+            s = torch.FloatTensor(s).to(self.device)
+            a = torch.FloatTensor(a).to(self.device)
+            r = torch.FloatTensor(r).unsqueeze(1).to(self.device)
+            ns = torch.FloatTensor(ns).to(self.device)
+            d = torch.FloatTensor(d).unsqueeze(1).to(self.device)
+
+            # 한 스텝 MDP이므로 y = r (부트스트랩 없음)
+            with torch.no_grad():
+                y = r
+
+            # Critic 업데이트
+            q1, q2 = self.critic(s, a)
+            q_loss = F.mse_loss(q1, y) + F.mse_loss(q2, y)
+            self.critic_opt.zero_grad()
+            q_loss.backward()
+            nn.utils.clip_grad_norm_(self.critic.parameters(), 1.0)
+            self.critic_opt.step()
+
+            # Actor 업데이트
+            pi, logp = self.actor.sample(s)
+            q1_pi, q2_pi = self.critic(s, pi)
+            min_q_pi = torch.min(q1_pi, q2_pi)
+            pi_loss = ((self.alpha * logp) - min_q_pi).mean()
+            self.actor_opt.zero_grad()
+            pi_loss.backward()
+            nn.utils.clip_grad_norm_(self.actor.parameters(), 1.0)
+            self.actor_opt.step()
+
+            # 엔트로피 자동 조절
+            if self.auto_entropy_tuning:
+                logp_entropy = logp.squeeze(1)
+                a_loss = -(self.log_alpha * (logp_entropy + self.target_entropy).detach()).mean()
+                self.alpha_opt.zero_grad()
+                a_loss.backward()
+                self.alpha_opt.step()
+                self.alpha = self.log_alpha.exp()
+
+            # 타겟 네트워크 소프트 업데이트
+            with torch.no_grad():
+                for tp, lp in zip(self.critic_target.parameters(), self.critic.parameters()):
+                    tp.data.copy_(self.tau * lp.data + (1 - self.tau) * tp.data)
+
+    def save_model(self, path):
+        torch.save({
+            "actor": self.actor.state_dict(),
+            "critic": self.critic.state_dict(),
+            "critic_target": self.critic_target.state_dict(),
+            "actor_opt": self.actor_opt.state_dict(),
+            "critic_opt": self.critic_opt.state_dict(),
+            "total_steps": self.total_steps,
+            "episode_rewards": self.episode_rewards,
+        }, path)
+        print(f"💾 Saved: {path}")
+
+# =========================
+# TCP Communicator
+# =========================
+class PIDGainCommunicator:
+    """
+    로봇 제어 PC와의 TCP 통신 관리
+    - PID gain 전송 (에피소드당 한 번)
+    - 실시간 상태 데이터 수신 (1kHz)
+    - 연결 상태 모니터링
+    """
+    def __init__(self, host, port, recv_timeout, recv_loop_timeout=0.05, cfg=None):
+        self.host, self.port = host, port 
+        self.recv_timeout = recv_timeout
+        self.recv_loop_timeout = recv_loop_timeout
+        self.cfg = cfg
+        self.socket = None
+        self.conn = None
+        self.connected = False
+        self.CPP_TO_PY_PACKET_FORMAT = ">HffffffBH"
+        self.CPP_TO_PY_PACKET_SIZE = 29
+        self.CPP_TO_PY_SOF = 0xAAAA
+        # self.PY_TO_CPP_PACKET_FORMAT = ">HfBBBH"  # SOF, rl_residual, timing_accurate, episode_done, learning_done, checksum (미사용)
+        # self.PY_TO_CPP_PACKET_SIZE = 11  # SOF(2) + rl_residual(4) + timing_accurate(1) + episode_done(1) + learning_done(1) + checksum(2) = 11 bytes (미사용)
+        # self.PY_TO_CPP_SOF = 0xBBBB  # (미사용)
+        
+        # PID gain 전송용 패킷 포맷
+        self.PID_PACKET_FORMAT = ">HfffBBBH"  # SOF, Kp, Ki, Kd, timing_accurate, episode_done, learning_done, checksum
+        self.PID_PACKET_SIZE = 19  # SOF(2) + Kp(4) + Ki(4) + Kd(4) + timing(1) + ep_done(1) + learn_done(1) + checksum(2) = 19 bytes
+        self.PID_SOF = 0xCCCC
+        self.latest_state = None
+        self.latest_sander_active = False
+        self.receive_thread = None
+        self.is_receiving = False
+        self.state_lock = threading.Lock()
+        self.stats_lock = threading.Lock()
+        self.packets_received = 0
+        self.packets_sent = 0
+        self.connection_start_time = None
+        self.last_packet_time = None
+        self.consecutive_failures = 0
+        self.old_data_warning_logged = False  # 오래된 데이터 경고 중복 방지
+
+    def _log(self, level, message):
+        Logger.log(level, message)
+
+    def connect(self):
+        try:
+            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.socket.bind((self.host, self.port))
+            self.socket.listen(1)
+            self.socket.settimeout(1.0)
+            self._log("INFO", f"로봇제어PC 연결 대기 중 {self.host}:{self.port} ...")
+            while True:
+                try:
+                    conn, addr = self.socket.accept()
+                    break
+                except socket.timeout:
+                    continue
+                except KeyboardInterrupt:
+                    self._log("WARNING", "사용자에 의해 연결 취소됨")
+                    return False
+            conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            conn.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            conn.settimeout(self.recv_timeout)
+            self._log("SUCCESS", f"연결 성공: {addr}")
+            self.conn = conn
+            self.connected = True
+            self.connection_start_time = time.perf_counter()
+            self.start_receiving()
+            return True
+        except KeyboardInterrupt:
+            self._log("WARNING", "사용자에 의해 연결 취소됨")
+            return False
+        except Exception as e:
+            self._log("ERROR", f"연결 오류: {e}")
+            return False
+        
+    def start_receiving(self):
+        self.is_receiving = True
+        self.receive_thread = threading.Thread(target=self._receive_loop, daemon=True)
+        self.receive_thread.start()
+        self._log("INFO", f"{self.cfg['RECV_FREQ_HZ']}Hz 수신 스레드 시작")
+
+    def _receive_loop(self):
+        next_receive_time = time.perf_counter()
+        recv_interval = self.cfg["RECV_INTERVAL_SEC"]
+        while self.is_receiving:
+            current_time = time.perf_counter()
+            if current_time >= next_receive_time:
+                next_receive_time += recv_interval
+                try:
+                    self.conn.settimeout(self.recv_loop_timeout)
+                    data = self._recv_exact(self.CPP_TO_PY_PACKET_SIZE)
+                    if data:
+                        state, sander_active = self._process_packet(data)
+                        if state is not None:
+                            with self.state_lock:
+                                self.latest_state = state
+                                self.latest_sander_active = sander_active
+                                self.last_packet_time = time.perf_counter()
+                            self.consecutive_failures = 0
+                except socket.timeout:
+                    pass
+                except Exception as e:
+                    self.consecutive_failures += 1
+                    self._log("WARNING", f"수신 루프 오류 ({self.consecutive_failures}회): {e}")
+                    if self.consecutive_failures >= 5:
+                        self._log("ERROR", "연속 수신 실패로 수신 루프 중단")
+                        break
+                    time.sleep(self.cfg["RECV_INTERVAL_SEC"])
+            else:
+                time.sleep(0.001)
+        self._log("INFO", "수신 루프 종료")
+
+    def _recv_exact(self, nbytes):
+        data = b''
+        while len(data) < nbytes:
+            chunk = self.conn.recv(nbytes - len(data))
+            if not chunk:
+                return None
+            data += chunk
+        return data
+    
+    def _process_packet(self, data):
+        try:
+            if len(data) != self.CPP_TO_PY_PACKET_SIZE:
+                self._log("WARNING", f"예상 {self.CPP_TO_PY_PACKET_SIZE}B, 수신 {len(data)}B")
+                return None, False
+            try:
+                (sof, current_force, target_force, force_error, force_error_dot, 
+                 force_error_int, pi_output, sander_active, 
+                 received_checksum) = struct.unpack(">HffffffBH", data)
+            except struct.error as e:
+                self._log("ERROR", f"패킷 언팩 실패: {e}")
+                return None, False
+            if sof != self.CPP_TO_PY_SOF:
+                self._log("WARNING", f"SOF 불일치: {hex(sof)} (예상: {hex(self.CPP_TO_PY_SOF)})")
+                return None, False
+            calculated_checksum = self.calculate_crc16(data[:-2])
+            if received_checksum != calculated_checksum:
+                self._log("ERROR", f"체크섬 오류: 수신:{received_checksum} 계산:{calculated_checksum}")
+                return None, False
+            state = np.array([
+                current_force,      # 0
+                target_force,       # 1 
+                force_error,        # 2
+                force_error_dot,    # 3
+                force_error_int,    # 4
+                pi_output,          # 5
+            ], dtype=np.float32)
+            sander_active = bool(sander_active)
+            with self.stats_lock:
+                self.packets_received += 1
+            return state, sander_active
+        except Exception as e:
+            self._log("ERROR", f"패킷 처리 오류: {e}")
+            return None, False
+        
+    def calculate_crc16(self, data: bytes) -> int:
+        crc = 0xFFFF
+        for byte in data:
+            crc ^= byte
+            for _ in range(8):
+                if crc & 0x0001:
+                    crc = (crc >> 1) ^ 0xA001
+                else:
+                    crc = crc >> 1
+        return crc
+    
+    def get_latest_state(self):
+        with self.state_lock:
+            if self.latest_state is not None:
+                current_time = time.perf_counter()
+                if (self.last_packet_time and 
+                    current_time - self.last_packet_time > 2.0):
+                    # 오래된 데이터 경고는 한 번만 출력
+                    if not self.old_data_warning_logged:
+                        self._log("WARNING", f"오래된 데이터 감지: {current_time - self.last_packet_time:.2f}초 전")
+                        self.old_data_warning_logged = True
+                else:
+                    # 데이터가 정상이면 경고 플래그 리셋
+                    self.old_data_warning_logged = False
+                    
+                if hasattr(self, 'last_logged_sander_active') and self.last_logged_sander_active != self.latest_sander_active:
+                    self._log("DEBUG", f"RL 플래그 변경: {self.last_logged_sander_active} -> {self.latest_sander_active}")
+                    self.last_logged_sander_active = self.latest_sander_active
+                elif not hasattr(self, 'last_logged_sander_active'):
+                    self.last_logged_sander_active = self.latest_sander_active
+                    self._log("DEBUG", f"초기 RL 플래그: {self.latest_sander_active}")
+                return self.latest_state.copy(), self.latest_sander_active
+        return None, False
+    
+        
+    def send_pid_once(self, kp, ki, kd, timing_accurate=True, episode_done=False, learning_done=False):
+        """
+        PID gain을 한 번만 전송 (에피소드 시작 시)
+        Args:
+            kp, ki, kd: PID gain 값들
+            timing_accurate: 타이밍 정확성
+            episode_done: 에피소드 종료 플래그
+            learning_done: 학습 종료 플래그
+        """
+        try:
+            payload = struct.pack(">HfffBBB", 
+                                  self.PID_SOF, 
+                                  float(kp), 
+                                  float(ki), 
+                                  float(kd),
+                                  bool(timing_accurate), 
+                                  bool(episode_done),
+                                  bool(learning_done))
+            checksum = self.calculate_crc16(payload)
+            final_packet = struct.pack(self.PID_PACKET_FORMAT, 
+                                     self.PID_SOF, 
+                                     float(kp), 
+                                     float(ki), 
+                                     float(kd),
+                                     bool(timing_accurate), 
+                                     bool(episode_done),
+                                     bool(learning_done),
+                                     checksum)
+            self.conn.sendall(final_packet)
+            with self.stats_lock:
+                self.packets_sent += 1
+            self._log("INFO", f"📡 PID gain 전송: Kp={kp:.2f}, Ki={ki:.2f}, Kd={kd:.2f}")
+            return True
+        except Exception as e:
+            self._log("ERROR", f"PID gain 전송 오류: {e}")
+            return False
+        
+    def send_reset(self):
+        try:
+            reset_data = struct.pack(">HBxxxH", 0xCCCC, 1, 0)
+            checksum = self.calculate_crc16(reset_data[:-2])
+            reset_packet = struct.pack(">HBxxxH", 0xCCCC, 1, checksum)
+            self.conn.sendall(reset_packet)
+            return True
+        except Exception as e:
+            self._log("ERROR", f"리셋 전송 오류: {e}")
+            return False
+        
+    def get_communication_stats(self):
+        uptime = time.perf_counter() - self.connection_start_time if self.connection_start_time else 0
+        with self.stats_lock:
+            packets_received = self.packets_received
+            packets_sent = self.packets_sent
+        return {
+            "uptime_seconds": uptime,
+            "packets_received": packets_received,
+            "packets_sent": packets_sent,
+            "receive_rate_hz": packets_received / uptime if uptime > 0 else 0,
+            "send_rate_hz": packets_sent / uptime if uptime > 0 else 0,
+        }
+    def print_communication_stats(self):
+        stats = self.get_communication_stats()
+        self._log("INFO", "\n📊 === 통신 통계 ===")
+        self._log("INFO", f"⏱️  가동 시간: {stats['uptime_seconds']:.1f}s")
+        self._log("INFO", f"📥 수신된 패킷: {stats['packets_received']}")
+        self._log("INFO", f"📤 송신된 패킷: {stats['packets_sent']}")
+        self._log("INFO", f"📥 수신률: {stats['receive_rate_hz']:.1f} Hz")
+        self._log("INFO", f"📤 송신률: {stats['send_rate_hz']:.1f} Hz")
+        self._log("INFO", "=" * 40)
+
+    def close(self):
+        try:
+            self.is_receiving = False
+            if self.receive_thread and self.receive_thread.is_alive():
+                self.receive_thread.join(timeout=1.0)
+            if self.conn: 
+                self.conn.close()
+            if self.socket: 
+                self.socket.close()
+        finally:
+            self.connected = False
+            self._log("INFO", "통신 종료")
+
+# =========================
+# Environment
+# =========================
+class PIDGainOptimizationEnvironment:
+    """
+    PID Gain 최적화 환경
+    - 에피소드 실행 및 관리
+    - 보상 계산 (18개 제어공학 지표)
+    - 데이터 수집 및 저장
+    - 학습 진행 모니터링
+    """
+    def __init__(self, cfg=None):
+        if cfg is None:
+            raise ValueError("cfg 파라미터가 필요합니다")
+        self.cfg = cfg
+        self.agent = PIDGainSACAgent(cfg)
+        self.comm = PIDGainCommunicator(cfg["HOST"], cfg["PORT"], cfg["RECV_TIMEOUT_SEC"], cfg["RECV_LOOP_TIMEOUT_SEC"], cfg)
+        self.best_episode_reward = -float("inf")
+        self.best_agent_episode = -1
+        self.fail_count = 0
+        self.FAIL_MAX = cfg["COMM_FAIL_MAX"]
+        self.last_log_time = None
+        self.last_valid_state = None
+        self.last_sander_active = False
+        
+        # ==== PID Gain 최적화용 변수들 ====
+        self.band_tol_N = Constants.BAND_TOLERANCE_N
+        self.safety_force_limit = Constants.SAFETY_FORCE_LIMIT
+
+        # ==== ADDED: reward breakdown logger ====
+        self.rlogger = RewardBreakdownLogger(self.cfg["LOG_DIR"])
+        
+        # ==== ADDED: control performance logger ====
+        self.cplogger = ControlPerformanceLogger(self.cfg["LOG_DIR"])
+        
+        # ==== ADDED: learning done logger ====
+        self.ldlogger = LearningDoneLogger(self.cfg["LOG_DIR"])
+        
+        # ==== ADDED: PID gain 최적화용 변수들 ====
+        self.episode_force_data = []  # 에피소드 동안 힘 데이터 수집
+        self.episode_start_time = None
+        self.current_pid_gains = None  # 현재 사용 중인 PID gain
+        
+        # ==== ADDED: 이전 에피소드 정보 추적 ====
+        self.previous_pid_gains = None  # 이전 에피소드의 PID gain
+        self.historical_errors = []  # 이전 에피소드들의 에러 통계
+        self.episode_count = 0  # 에피소드 카운터
+        
+        # ==== ADDED: 이전 5개 에피소드 성능 히스토리 (최적값) ====
+        self.episode_history = []  # 최근 5개 에피소드의 (PID, 성능) 기록
+        self.max_history = 5  # 최대 5개 에피소드 히스토리 유지 (최적값)
+        
+    def _log(self, level, message):
+        Logger.log(level, message)
+    
+    def calculate_episode_reward(self, force_data, target_force=45.0):
+        """
+        에피소드 총보상 계산 (PID gain 최적화용)
+        Args:
+            force_data: 에피소드 동안의 힘 데이터 리스트
+            target_force: 목표 힘 (기본 45N)
+        Returns:
+            total_reward: 에피소드 총보상
+            metrics: 성능 지표 딕셔너리
+        """
+        if not force_data:
+            return -100.0, {}
+        
+        force_array = np.array(force_data)
+        errors = force_array - target_force
+        abs_errors = np.abs(errors)
+        
+        # 1. RMSE (Root Mean Square Error) - 제어 정확도
+        rmse = np.sqrt(np.mean(abs_errors**2))
+        
+        # 2. 오버슈트 계산 (스텝 크기 Δ 기준)
+        F0 = force_array[0] if len(force_array) > 0 else target_force
+        Delta = max(1.0, abs(target_force - F0))  # 스텝 크기 (최소 1N 보장)
+        max_force = np.max(force_array)
+        overshoot = max(0, (max_force - target_force) / Delta * 100) if max_force > target_force else 0
+        
+        # 3. 정착시간 계산 (연속 유지 기준) - 1kHz 기준
+        band = 0.05 * target_force  # ±5% 밴드
+        within = np.abs(force_array - target_force) <= band
+        hold_duration = int(2.0 * 1000)  # 2초 연속 유지 (1kHz 기준)
+        
+        # 연속 유지 구간 찾기
+        run_length = 0
+        settling_time = 15.0  # 기본값: 전체 시간
+        for k, in_band in enumerate(within):
+            if in_band:
+                run_length += 1
+                if run_length >= hold_duration:
+                    settling_time = max(0.0, (k - hold_duration) / 1000.0)
+                    break
+            else:
+                run_length = 0
+        
+        # 4. 제어 노력 (실제 제어 입력 RMS) - 로거와 동일한 정의
+        if hasattr(self.cplogger, 'pi_output_data') and len(self.cplogger.pi_output_data) > 0:
+            control_effort = float(np.sqrt(np.mean(np.square(np.array(self.cplogger.pi_output_data)))))
+        else:
+            control_effort = 0.0
+        
+        # 5. 오차 분산 (안정성)
+        error_variance = np.var(errors)
+        
+        # 6. 밴드 이탈 시간 (목표 범위 밖 체류 시간) - 1kHz 기준
+        out_of_range = abs_errors > 1.0  # ±1N 범위
+        out_of_band_time = np.sum(out_of_range) / 1000.0  # 1kHz 기준
+        
+        # 7. 밴드 유지 시간 (목표 ±1N 범위 내 유지) - 1kHz 기준
+        in_band = abs_errors <= 1.0
+        band_time = np.sum(in_band) / 1000.0  # 1kHz 기준
+        
+        # 이상적인 성능 조건 체크 (사용자 요구사항)
+        ideal_conditions = {
+            'fast_response': settling_time <= 1.0,           # 매우 빠른 응답: 1초 이내 정착
+            'no_overshoot': overshoot <= 1.0,                # 오버슈트 없음: 1% 이하
+            'precise_control': rmse <= 0.3,                  # 정밀 제어: RMSE 0.3N 이하
+            'stable_band': band_time >= 12.0,                # 안정적 밴드 유지: 12초 이상 ±1N 유지
+            'low_effort': control_effort <= 0.2,             # 낮은 제어 노력: PI 출력 RMS 0.2 이하
+            'no_saturation': out_of_band_time <= 0.5         # 밴드 이탈 없음: 0.5초 이하
+        }
+        
+        # 이상적인 성능 달성 시 보상 (스케일 조정)
+        ideal_bonus = 0.0
+        ideal_count = sum(ideal_conditions.values())
+        
+        if ideal_count >= 6:  # 모든 조건 달성
+            ideal_bonus = 20.0  # "이게 정답이야!" 보상 (스케일 조정)
+            print("🎉 [이상적 성능] 모든 조건 달성! +20 보상")
+        elif ideal_count >= 4:  # 대부분 조건 달성
+            ideal_bonus = 10.0
+            # print("✨ [우수한 성능] 대부분 조건 달성! +10 보상")  # 간소화
+        elif ideal_count >= 2:  # 일부 조건 달성
+            ideal_bonus = 5.0
+            # print("👍 [양호한 성능] 일부 조건 달성! +5 보상")  # 간소화
+        
+        # 기본 보상 계산
+        reward = (
+            -Constants.REWARD_WEIGHT_RMSE * rmse +                    # RMSE 페널티
+            -Constants.REWARD_WEIGHT_OVERSHOOT * overshoot +          # 오버슈트 페널티
+            -Constants.REWARD_WEIGHT_SETTLING * settling_time +       # 정착시간 페널티
+            -Constants.REWARD_WEIGHT_EFFORT * control_effort +        # 제어 노력 페널티
+            -Constants.REWARD_WEIGHT_VARIANCE * error_variance +      # 오차 분산 페널티
+            -Constants.REWARD_WEIGHT_OUT_OF_BAND * out_of_band_time +   # 밴드 이탈 시간 페널티
+            +Constants.REWARD_WEIGHT_BAND * (1.0 if band_time >= 10.0 else band_time / 10.0)  # 밴드 유지 보상
+        )
+        
+        # 이상적 성능 보너스 추가
+        reward += ideal_bonus
+        
+        # 안전 위반 페널티
+        if np.max(force_array) > Constants.SAFETY_FORCE_LIMIT:
+            reward += Constants.REWARD_MIN
+        
+        metrics = {
+            'rmse': rmse,
+            'overshoot': overshoot,
+            'settling_time': settling_time,
+            'control_effort': control_effort,
+            'error_variance': error_variance,
+            'out_of_band_time': out_of_band_time,
+            'band_time': band_time,
+            'ideal_bonus': ideal_bonus,
+            'ideal_count': ideal_count,
+            'ideal_conditions': ideal_conditions,
+            'total_reward': reward
+        }
+        
+        return reward, metrics
+
+    def generate_episode_reward_graph(self, save_to_rlogger_folder=True):
+        if not hasattr(self, 'agent') or not self.agent.episode_rewards:
+            self._log("WARNING", "생성할 보상 데이터가 없습니다")
+            return
+        try:
+            episode_rewards = self.agent.episode_rewards
+            episodes = list(range(1, len(episode_rewards) + 1))
+            plt.figure(figsize=(12, 6))
+            plt.plot(episodes, episode_rewards, 'b-', linewidth=2, marker='o', markersize=4)
+            plt.xlabel('Episode', fontsize=12)
+            plt.ylabel('Episode Reward', fontsize=12)
+            plt.title('Episode Rewards Over Time', fontsize=14, fontweight='bold')
+            plt.grid(True, alpha=0.3)
+            if len(episode_rewards) > 1:
+                avg_reward = np.mean(episode_rewards)
+                plt.axhline(y=avg_reward, color='r', linestyle='--', alpha=0.7, 
+                           label=f'Average: {avg_reward:.2f}')
+                plt.legend()
+            
+            # RewardBreakdownLogger 폴더에 저장 (기본값)
+            if save_to_rlogger_folder and hasattr(self, 'rlogger'):
+                filename = os.path.join(self.rlogger.log_dir, "episode_rewards.png")
+            else:
+                # 기존 방식 (LOG_DIR에 저장)
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"{self.cfg['LOG_DIR']}/episode_rewards_{timestamp}.png"
+                os.makedirs(os.path.dirname(filename), exist_ok=True)
+            
+            plt.tight_layout()
+            plt.savefig(filename, dpi=300, bbox_inches='tight')
+            plt.close()
+            self._log("INFO", f"📈 에피소드별 보상 그래프 저장: {filename}")
+        except Exception as e:
+            self._log("ERROR", f"에피소드별 보상 그래프 생성 오류: {e}")
+    
+    def is_episode_done(self, force_data, target_force):
+        """
+        에피소드 종료 조건 확인 (PID gain 최적화용)
+        Args:
+            force_data: 현재까지의 힘 데이터
+            target_force: 목표 힘
+        Returns:
+            done: 에피소드 종료 여부
+            reason: 종료 이유
+        """
+        if not force_data:
+            return False, "no_data"
+        
+        current_force = force_data[-1]
+        
+        # 안전 위반 체크
+        if current_force > self.safety_force_limit:
+            self._log("WARNING", f"안전 위반: 힘 {current_force:.1f}N > {self.safety_force_limit}N")
+            return True, "safety_violation"
+        
+        # 15초 에피소드는 시간으로만 종료
+        return False, "time_based"
+
+    # ---- PID Gain 최적화용 유틸리티 메서드들 ----
+
+    def reset_episode(self):
+        """에피소드 리셋 (PID gain 최적화용)"""
+        self.episode_force_data = []
+        self.episode_start_time = None
+        self.current_pid_gains = None
+        self.last_log_time = None
+        self.last_valid_state = None
+        self.last_sander_active = False
+        
+        # 로봇 리셋 신호 전송
+        ok = self.comm.send_reset()
+        if ok:
+            self._log("INFO", "🔄 에피소드 리셋 완료")
+        else:
+            self._log("WARNING", "⚠️ 리셋 신호 전송 실패")
+        return ok
+
+    # ---- PID Gain 최적화 메인 루프 ----
+    def run_pid_optimization_training(self, episodes=None):
+        """
+        PID gain 최적화를 위한 강화학습 메인 루프
+        - 에피소드당 한 번 PID gain 선택
+        - 15초 동안 해당 PID gain으로 제어
+        - 에피소드 종료 후 총보상 계산 및 학습
+        """
+        episodes = episodes or self.cfg["EPISODES"]
+        if not self.comm.connect():
+            self._log("ERROR", "로봇PC 연결 실패")
+            return
+            
+        model_save_dir = self.cfg["MODEL_SAVE_DIR"]
+        os.makedirs(model_save_dir, exist_ok=True)
+        
+        self._log("INFO", "🚀 PID Gain 최적화 강화학습 시작")
+        self._log("INFO", f"🎯 목표 힘: {self.cfg['TARGET_FORCE']}N 고정")
+        self._log("INFO", f"⏱️ 에피소드 길이: {self.cfg['EPISODE_SECONDS']}초")
+        self._log("INFO", f"📡 수신: 1kHz 상태 수신, 에피소드당 1회 PID 전송")
+        self._log("INFO", f"📁 모델 저장: {model_save_dir}")
+        
+        # RL 활성화 대기
+        self._log("INFO", "🔄 RL 활성화 대기 중...")
+        wait_start = time.perf_counter()
+        while True:
+            state, sander_active = self.comm.get_latest_state()
+            if sander_active:
+                wait_duration = time.perf_counter() - wait_start
+                self._log("INFO", f"🎯 RL 활성화! ({wait_duration:.1f}s 대기)")
+                break
+            if state is not None:
+                current_force = state[0]
+                self._log("INFO", f"⏳ 대기 중... Current Force: {current_force:.1f}N")
+            time.sleep(1.0)
+            if time.perf_counter() - wait_start > 300:
+                self._log("WARNING", "⚠️ RL 활성화 타임아웃 (5분)")
+                return
+        
+        episode_stats = []
+        best_reward = -float('inf')
+        best_pid_gains = None
+        
+        for ep in range(episodes):
+            self.episode_count = ep
+            self._log("INFO", f"\n🎬 === 에피소드 {ep+1}/{episodes} 시작 ===")
+            
+            # 1. 이전 에피소드 정보로 초기 상태 추정
+            print(f"\n🔍 [에피소드 {ep+1}] 시작")
+            if ep > 0 and self.previous_pid_gains is not None:
+                # 이전 에피소드 정보를 활용한 상태 추정
+                print(f"📊 이전 에피소드 PID 정보 활용: {self.previous_pid_gains}")
+                initial_state = create_initial_state(
+                    [], 
+                    self.cfg['TARGET_FORCE'], 
+                    self.previous_pid_gains, 
+                    self.historical_errors,
+                    self.episode_history
+                )
+            else:
+                # 첫 에피소드: 기준 PID gain으로 상태 추정
+                print("🆕 첫 에피소드 - 기준 PID (80, 130, 0)로 상태 추정")
+                base_pid = np.array([80.0, 130.0, 0.0], dtype=np.float32)
+                initial_state = create_initial_state(
+                    [], 
+                    self.cfg['TARGET_FORCE'], 
+                    base_pid, 
+                    []
+                )
+            
+            # 2. PID gain 선택 (에피소드당 한 번)
+            if ep == 0:
+                # 첫 에피소드: 기준 PID gain 사용 (P=80, I=130, D=0)
+                pid_gains = np.array([80.0, 130.0, 0.0], dtype=np.float32)
+                print(f"🎯 [첫 에피소드] 기준 PID 사용: Kp={pid_gains[0]:.0f}, Ki={pid_gains[1]:.0f}, Kd={pid_gains[2]:.0f}")
+                self._log("INFO", f"🎯 기준 PID: Kp={pid_gains[0]:.0f}, Ki={pid_gains[1]:.0f}, Kd={pid_gains[2]:.0f}")
+            else:
+                # 2번째 에피소드부터: 강화학습으로 PID gain 선택 (이전 에피소드 성능 참고)
+                pid_gains, _ = self.agent.select_action(initial_state, evaluate=False)
+                print(f"🤖 [RL] 강화학습 PID 선택: Kp={pid_gains[0]:.2f}, Ki={pid_gains[1]:.2f}, Kd={pid_gains[2]:.2f}")
+                self._log("INFO", f"🤖 RL PID: Kp={pid_gains[0]:.2f}, Ki={pid_gains[1]:.2f}, Kd={pid_gains[2]:.2f}")
+            
+            # 3. PID gain 전송 (한 번만)
+            print(f"📤 [전송] PID gain 전송 중...")
+            success = self.comm.send_pid_once(
+                pid_gains[0], pid_gains[1], pid_gains[2], 
+                timing_accurate=True, episode_done=False, learning_done=False
+            )
+            if not success:
+                print("❌ [오류] PID gain 전송 실패")
+                self._log("ERROR", "PID gain 전송 실패")
+                continue
+            # print("✅ [전송] PID gain 전송 완료")  # 간소화
+            
+            # 4. PID gain 적용 대기 (새로운 PID gain이 적용될 때까지)
+            print("⏳ [대기] PID gain 적용 대기 중... (100ms)")
+            time.sleep(0.1)  # 100ms 대기
+            
+            # 5. 새로운 PID gain으로 제어된 실제 상태 관측
+            print("🔍 [관측] 실제 제어 상태 관측 중...")
+            actual_state, _ = self.comm.get_latest_state()
+            if actual_state is not None:
+                # 실제 관측된 상태로 업데이트
+                actual_initial_state = create_initial_state([actual_state[0]], self.cfg['TARGET_FORCE'])
+                print(f"✅ [관측] 실제 상태: Force={actual_state[0]:.2f}N")
+                self._log("INFO", f"📊 실제 상태 관측: Force={actual_state[0]:.2f}N")
+            else:
+                # 관측 실패 시 추정 상태 사용
+                actual_initial_state = initial_state
+                print("⚠️  [경고] 실제 상태 관측 실패, 추정 상태 사용")
+                self._log("WARNING", "실제 상태 관측 실패, 추정 상태 사용")
+            
+            # 6. 15초 동안 1kHz 데이터 수집
+            self.episode_force_data = []
+            self.episode_start_time = time.perf_counter()
+            self.current_pid_gains = pid_gains.copy()
+            
+            print(f"📊 [수집] 15초 1kHz 데이터 수집 시작...")
+            self._log("INFO", f"📊 15초 1kHz 데이터 수집 시작...")
+            start_time = time.perf_counter()
+            data_count = 0
+            prev_error = 0.0
+            prev_pi_output = 0.0
+            
+            # 주기 고정 방식으로 1kHz 정확도 향상
+            dt = 0.001  # 1ms
+            t_next = time.perf_counter()
+            
+            while (time.perf_counter() - start_time) < self.cfg["EPISODE_SECONDS"]:
+                state, sander_active = self.comm.get_latest_state()
+                if state is None:
+                    time.sleep(0.001)
+                    continue
+                
+                self.episode_force_data.append(state[0])  # 힘 데이터 수집
+                data_count += 1
+                
+                # 실시간 제어 지표 데이터 수집
+                current_time = time.perf_counter() - self.episode_start_time
+                self.cplogger.add_data_point(
+                    time=current_time,
+                    force=state[0],
+                    target=self.cfg['TARGET_FORCE'],
+                    control_effort=np.sum(np.abs(pid_gains)),
+                    pi_output=state[5],
+                    pid_gains=pid_gains  # PID gain 정보 추가
+                )
+                
+                # RewardBreakdownLogger에 스텝 로그 추가 (state가 None이 아님을 보장)
+                if hasattr(self, 'rlogger'):
+                    error = abs(state[0] - self.cfg['TARGET_FORCE'])
+                    prog = np.exp(-error/5.0)
+                    in_band_now = error <= 0.05 * self.cfg['TARGET_FORCE']
+                    edot_abs = abs(prev_error - error) / 0.001 if data_count > 1 else 0.0
+                    du_abs = abs(state[5] - prev_pi_output) if data_count > 1 else 0.0
+                    self.rlogger.log_step(ep+1, data_count, prog, in_band_now, edot_abs, du_abs, 0.0, False)
+                    prev_error = error
+                    prev_pi_output = state[5]
+                
+                # 주기 고정 방식으로 정확한 1kHz 수집
+                t_next += dt
+                delay = t_next - time.perf_counter()
+                if delay > 0:
+                    time.sleep(delay)
+            
+            print(f"📈 [수집] 완료: {data_count}개 데이터 (목표: {int(self.cfg['EPISODE_SECONDS'] * 1000)})")
+            self._log("INFO", f"📈 수집된 데이터 포인트: {data_count}개 (목표: {int(self.cfg['EPISODE_SECONDS'] * 1000)})")
+            
+            # 5. 에피소드 총보상 계산
+            print(f"🧮 [계산] 에피소드 보상 계산 중...")
+            episode_reward, metrics = self.calculate_episode_reward(
+                self.episode_force_data, self.cfg['TARGET_FORCE']
+            )
+            print(f"🏆 [결과] 보상: {episode_reward:.2f}, RMSE: {metrics['rmse']:.2f}, 오버슈트: {metrics['overshoot']:.1f}%")
+            
+            # 6. Transition 저장 (한 스텝 MDP) - 실제 관측된 초기 상태 사용
+            print(f"💾 [저장] Transition 저장 중...")
+            final_state = np.zeros(self.cfg["STATE_DIM"], dtype=np.float32)  # 최종 상태는 zero로 설정
+            self.agent.store_transition(actual_initial_state, pid_gains, episode_reward, final_state, True)
+            
+            # 7. 학습 (첫 에피소드 후부터)
+            if ep >= 1:  # 2번째 에피소드부터 학습
+                # 동적 업데이트 횟수 조정 (과적합 방지)
+                max_updates = min(self.cfg["UPDATES_PER_EPISODE"], 
+                                len(self.agent.replay) // self.cfg["BATCH_SIZE"])
+                actual_updates = max(1, max_updates)
+                print(f"🧠 [학습] 강화학습 업데이트 중... ({actual_updates}회)")
+                self.agent.update_parameters_one_step(
+                    self.cfg["BATCH_SIZE"], 
+                    actual_updates
+                )
+            else:
+                print(f"⏳ [대기] 첫 에피소드 - 기준값 성능 학습 중...")
+            
+            # 8. 통계 업데이트
+            episode_duration = time.perf_counter() - start_time
+            episode_stat = {
+                "episode": ep + 1,
+                "duration": episode_duration,
+                "pid_gains": pid_gains.copy(),
+                "reward": episode_reward,
+                "metrics": metrics
+            }
+            episode_stats.append(episode_stat)
+            self.agent.episode_rewards.append(episode_reward)
+            
+            # RewardBreakdownLogger 플러시 (에피소드 경계에서)
+            if hasattr(self, 'rlogger'):
+                self.rlogger.flush_if_needed(ep+1, force=True, episode_rewards=self.agent.episode_rewards)
+            
+            # 최고 성능 PID gain 저장
+            if episode_reward > best_reward:
+                best_reward = episode_reward
+                best_pid_gains = pid_gains.copy()
+                self.agent.save_model(f"{model_save_dir}/best_pid_agent_episode_{ep+1}_reward_{best_reward:.2f}.pth")
+            
+            # 9. 로깅
+            self._log("INFO", f"🎯 에피소드 {ep+1} 완료")
+            self._log("INFO", f"⏱️  지속시간: {episode_duration:.1f}s")
+            self._log("INFO", f"🏆 보상: {episode_reward:.2f}")
+            self._log("INFO", f"📊 RMSE: {metrics['rmse']:.2f}")
+            self._log("INFO", f"📈 오버슈트: {metrics['overshoot']:.1f}%")
+            self._log("INFO", f"⏰ 정착시간: {metrics['settling_time']:.2f}s")
+            self._log("INFO", f"🎯 밴드유지: {metrics['band_time']:.1f}s")
+            self._log("INFO", f"🏅 최고보상: {best_reward:.2f}")
+            
+            # 10. 이전 에피소드 정보 업데이트
+            print(f"📚 [업데이트] 이전 에피소드 정보 저장 중...")
+            self.previous_pid_gains = pid_gains.copy()
+            
+            # 에피소드 히스토리 업데이트 (최근 5개 에피소드만 유지)
+            episode_record = {
+                'episode': ep + 1,
+                'pid_gains': pid_gains.copy(),
+                'reward': episode_reward,
+                'metrics': metrics
+            }
+            self.episode_history.append(episode_record)
+            
+            # 최근 5개 에피소드만 유지
+            if len(self.episode_history) > self.max_history:
+                self.episode_history.pop(0)
+            
+            print(f"📊 [히스토리] 에피소드 {ep+1} 기록: 보상={episode_reward:.2f}, PID={pid_gains}")
+            print(f"📈 [히스토리] 총 {len(self.episode_history)}개 에피소드 기록 유지 (최대 5개)")
+            
+            # 에러 통계 업데이트 (최근 10개 에피소드만 유지)
+            if len(self.episode_force_data) > 0:
+                episode_errors = [f - self.cfg['TARGET_FORCE'] for f in self.episode_force_data]
+                avg_error = np.mean(episode_errors)
+                self.historical_errors.append(avg_error)
+                
+                # 최근 10개 에피소드만 유지
+                if len(self.historical_errors) > 10:
+                    self.historical_errors.pop(0)
+                
+                print(f"📈 [에러] 평균 에러: {avg_error:.2f}N, 히스토리={len(self.historical_errors)}개")
+            else:
+                print("⚠️  [경고] 에피소드 데이터 없음, 에러 히스토리 업데이트 건너뜀")
+            
+            print(f"💾 [저장] 다음 에피소드용 PID: Kp={self.previous_pid_gains[0]:.2f}, Ki={self.previous_pid_gains[1]:.2f}, Kd={self.previous_pid_gains[2]:.2f}")
+            self._log("INFO", f"📚 이전 PID 저장: {self.previous_pid_gains}")
+            self._log("INFO", f"📈 에피소드 히스토리: {len(self.episode_history)}개 (최대 5개)")
+            
+            # 11. 에피소드별 제어 지표 저장
+            print(f"💾 [저장] 에피소드 지표 저장 중...")
+            self.cplogger.save_episode_metrics(ep + 1)
+            self.cplogger.reset_episode_data()
+            
+            # 12. 에피소드 완료
+            print(f"✅ [완료] 에피소드 {ep+1} 완료! 다음 에피소드 준비 중...")
+            print("=" * 80)
+            
+            # 13. 로봇 리셋 대기
+            if ep < episodes - 1:  # 마지막 에피소드가 아닌 경우
+                self._log("INFO", "🔄 로봇 리셋 대기 중...")
+                time.sleep(2.0)  # 리셋 대기 시간
+        
+        # 12. 최종 결과
+        self._log("INFO", "\n🎯 PID Gain 최적화 완료!")
+        self._log("INFO", f"✅ {episodes}개 에피소드 완료")
+        self._log("INFO", f"🏆 최고 보상: {best_reward:.2f}")
+        self._log("INFO", f"🎯 최적 PID: Kp={best_pid_gains[0]:.2f}, Ki={best_pid_gains[1]:.2f}, Kd={best_pid_gains[2]:.2f}")
+        
+        # 13. 에피소드 요약 CSV 저장
+        summary_csv = os.path.join(self.cplogger.control_perf_dir, "episode_summary.csv")
+        with open(summary_csv, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["episode", "Kp", "Ki", "Kd", "reward", "rmse", "overshoot", "settling_time", "band_time", "out_of_band_time"])
+            for s in episode_stats:
+                m = s["metrics"]
+                w.writerow([s["episode"], *s["pid_gains"], s["reward"], m["rmse"], m["overshoot"], m["settling_time"], m["band_time"], m["out_of_band_time"]])
+        self._log("INFO", f"📄 에피소드 요약 저장: {summary_csv}")
+        
+        # 14. 데이터 저장
+        DataSaver.save_all_data(self, episodes, force=True)
+        
+        # 15. 학습 완료 신호 전송
+        self.comm.send_pid_once(0, 0, 0, True, False, True)  # learning_done=True
+        self.comm.close()
+
+# =========================
+# Signal Handler for Safe Exit
+# =========================
+def signal_handler(signum, frame):
+    print(f"\n⚠️ Received signal {signum}. Shutting down gracefully...")
+    if 'env' in globals():
+        try:
+            # ==== ADDED: 강제 종료 시 learning_done=True 전송 ====
+            print("📡 강화학습 강제 종료 신호 전송 중...")
+            try:
+                success = env.comm.send_pid_once(0.0, 0.0, 0.0, True, False, True)  # learning_done=True
+                if success:
+                    print("✅ 강화학습 강제 종료 신호 전송 성공")
+                else:
+                    print("⚠️ 강화학습 강제 종료 신호 전송 실패")
+            except Exception as e:
+                print(f"⚠️ 강화학습 강제 종료 신호 전송 오류: {e}")
+            
+            print("📈 데이터 저장 중...")
+            # ==== ADDED: 강제 종료 시에도 지금까지 쌓인 로우를 저장/그림 ====
+            try:
+                # 현재까지 완료된 에피소드 수로 flush (강제 실행)
+                current_episode = len(env.agent.episode_rewards)
+                env.rlogger.flush_if_needed(current_episode, force=True, episode_rewards=env.agent.episode_rewards)
+            except Exception as e:
+                Logger.log("ERROR", f"reward breakdown flush 실패: {e}")
+            
+            # ==== ADDED: 제어 성능 지표 저장 ====
+            try:
+                print("📊 제어 성능 지표 저장 중...")
+                env.cplogger.save_performance_summary()
+                env.cplogger.generate_plots()
+                print("✅ 제어 성능 지표 저장 완료!")
+            except Exception as e:
+                print(f"⚠️ 제어 성능 지표 저장 실패: {e}")
+            
+            # ==== ADDED: Learning Done 폴더에 파일들 복사 ====
+            try:
+                print("📁 Learning Done 폴더에 파일들 복사 중...")
+                env.ldlogger.copy_episode_rewards(env.agent.episode_rewards, env.rlogger.log_dir)
+                env.ldlogger.copy_reward_breakdown(env.rlogger.log_dir)
+                print("✅ Learning Done 폴더 복사 완료!")
+            except Exception as e:
+                print(f"⚠️ Learning Done 폴더 복사 실패: {e}")
+            
+            
+            Logger.log("INFO", "✅ 데이터 저장 완료!")
+        except Exception as e:
+            Logger.log("ERROR", f"❌ 데이터 저장 실패: {e}")
+    sys.exit(0)
+
+# =========================
+# STORAGE CLASSES
+# =========================
 class ControlPerformanceLogger:
     """
-    9개 핵심 제어공학 지표를 계산하고 저장하는 클래스
+    확장된 제어공학 지표를 계산하고 저장하는 클래스
+    - 기본 지표: RMSE, SSE, Rise Time, Settling Time, Overshoot, Control Effort
+    - 추가 지표: IAE, ISE, ITAE, ITSE, Input RMS, Total Variation, Saturation Time, Success Rate
+    - 논문용 고품질 그래프 생성 (Times New Roman 폰트)
     """
     def __init__(self, log_dir):
         self.base_log_dir = log_dir
@@ -304,7 +1565,10 @@ class ControlPerformanceLogger:
         self.control_perf_dir = os.path.join(self.log_dir, "control_performance")
         os.makedirs(self.control_perf_dir, exist_ok=True)
         
-        # 데이터 저장용 리스트들
+        # 폰트 설정 (논문용 Times New Roman)
+        self._setup_fonts()
+        
+        # 기본 데이터 저장용 리스트들
         self.time_data = []
         self.force_data = []
         self.target_data = []
@@ -312,37 +1576,105 @@ class ControlPerformanceLogger:
         self.control_effort_data = []
         self.pi_output_data = []
         
+        # 추가 지표용 데이터 저장
+        self.pid_gains_history = []  # PID gain 변화 추적용
+        self.input_data = []  # 제어 입력 데이터
+        
         # 에피소드별 지표 저장
         self.episode_metrics = []
         
         print(f"📁 Control Performance 저장 폴더: {self.control_perf_dir}")
+        print(f"🎨 폰트 설정: Times New Roman (제목: 36pt, 축제목: 32pt, 축숫자: 30pt)")
+    
+    def _setup_fonts(self):
+        """논문용 폰트 설정 (Times New Roman)"""
+        try:
+            import matplotlib.pyplot as plt
+            plt.rcParams['font.family'] = 'Times New Roman'
+            plt.rcParams['font.size'] = 30  # 기본 폰트 크기
+            plt.rcParams['axes.titlesize'] = 36  # 그래프 제목
+            plt.rcParams['axes.labelsize'] = 32  # 축 제목
+            plt.rcParams['xtick.labelsize'] = 30  # x축 숫자
+            plt.rcParams['ytick.labelsize'] = 30  # y축 숫자
+            plt.rcParams['legend.fontsize'] = 28  # 범례
+            plt.rcParams['figure.titlesize'] = 36  # 전체 그림 제목
+            print("✅ 폰트 설정 완료: Times New Roman")
+        except Exception as e:
+            print(f"⚠️ 폰트 설정 실패: {e}")
+            print("기본 폰트 사용")
 
-    def add_data_point(self, time, force, target, control_effort, pi_output):
-        """실시간 데이터 포인트 추가 (100Hz에서 호출)"""
+    def add_data_point(self, time, force, target, control_effort, pi_output, pid_gains=None):
+        """실시간 데이터 포인트 추가 (1kHz에서 호출)
+        Args:
+            time: 시간 (초)
+            force: 현재 힘 (N)
+            target: 목표 힘 (N)
+            control_effort: 제어 노력 (PID gain 합) - 사용하지 않음
+            pi_output: PID 출력 (실제 제어 입력)
+            pid_gains: PID gain 값들 [Kp, Ki, Kd] (선택사항)
+        """
         self.time_data.append(time)
         self.force_data.append(force)
         self.target_data.append(target)
         self.error_data.append(abs(force - target))
-        self.control_effort_data.append(control_effort)
+        # 실제 제어 입력으로 pi_output 사용
+        self.control_effort_data.append(abs(pi_output))
         self.pi_output_data.append(pi_output)
+        
+        # PID gain 정보 저장 (추가 지표 계산용)
+        if pid_gains is not None:
+            self.pid_gains_history.append(pid_gains.copy())
+            # 제어 입력으로 실제 pi_output 사용
+            self.input_data.append(np.sum(np.abs(pid_gains)))
+        else:
+            self.pid_gains_history.append([0.0, 0.0, 0.0])
+            self.input_data.append(0.0)
 
     def calculate_episode_metrics(self, episode_num):
-        """에피소드별 9개 핵심 지표 계산"""
+        """에피소드별 확장된 제어공학 지표 계산
+        Returns:
+            dict: 18개 제어공학 지표 (기본 6개 + 추가 12개)
+        """
         if not self.time_data:
             return None
             
-        metrics = {
+        # 기본 지표들 (기존)
+        basic_metrics = {
             'episode': episode_num,
             'rmse': self._calculate_rmse(),
-            'sse': self._calculate_sse(),
+            'steady_state_error': self._calculate_steady_state_error(),
             'rise_time': self._calculate_rise_time(),
             'settling_time': self._calculate_settling_time(),
             'overshoot': self._calculate_overshoot(),
             'control_effort': self._calculate_control_effort(),
+        }
+        
+        # 추가 지표들 (논문용)
+        additional_metrics = {
+            # 추종 성능 지표
+            'iae': self._calculate_iae(),           # Integral Absolute Error
+            'ise': self._calculate_ise(),           # Integral Square Error
+            'itae': self._calculate_itae(),         # Integral Time Absolute Error
+            'itse': self._calculate_itse(),         # Integral Time Square Error
+            
+            # 제어 노력 지표
+            'input_rms': self._calculate_input_rms(),  # Input RMS
+            'total_variation': self._calculate_total_variation(),  # Total Variation
+            'out_of_band_time': self._calculate_out_of_band_time(),  # Out of Band Time
+            
+            # 안정성 지표
+            'success_rate': self._calculate_success_rate(),  # Success Rate
+            'error_variance': self._calculate_error_variance(),  # Error Variance
+            'peak_count': self._calculate_peak_count(),  # Peak Count
+            
+            # 기존 지표들
             'residual_effectiveness': self._calculate_residual_effectiveness(),
             'pi_rl_synergy': self._calculate_pi_rl_synergy(),
             'learning_progress': self._calculate_learning_progress()
         }
+        
+        # 모든 지표 통합
+        metrics = {**basic_metrics, **additional_metrics}
         
         self.episode_metrics.append(metrics)
         return metrics
@@ -353,8 +1685,8 @@ class ControlPerformanceLogger:
             return None
         return np.sqrt(np.mean(np.square(self.error_data)))
 
-    def _calculate_sse(self):
-        """SSE 계산 (마지막 10% 구간의 평균 오차)"""
+    def _calculate_steady_state_error(self):
+        """Steady State Error 계산 (마지막 10% 구간의 평균 절대 오차)"""
         if not self.error_data:
             return None
         last_10_percent = max(1, int(len(self.error_data) * 0.1))
@@ -380,19 +1712,31 @@ class ControlPerformanceLogger:
         return None
 
     def _calculate_settling_time(self):
-        """Settling Time 계산 (±5% 오차 범위)"""
+        """Settling Time 계산 (연속 유지 기준) - 에피소드 보상과 동일한 기준"""
         if not self.force_data or not self.target_data:
             return None
             
         target = self.target_data[0]
-        tolerance = target * 0.05
+        band = 0.05 * target  # ±5% 밴드
         force_array = np.array(self.force_data)
         time_array = np.array(self.time_data)
         
-        settled_indices = np.where(np.abs(force_array - target) <= tolerance)[0]
-        if len(settled_indices) > 0:
-            return float(time_array[settled_indices[0]])
-        return None
+        # 연속 유지 구간 찾기 (2초 연속 유지)
+        within = np.abs(force_array - target) <= band
+        hold_duration = int(2.0 * 1000)  # 2초 연속 유지 (1kHz 기준)
+        
+        run_length = 0
+        settling_time = None
+        for k, in_band in enumerate(within):
+            if in_band:
+                run_length += 1
+                if run_length >= hold_duration:
+                    settling_time = max(0.0, (k - hold_duration) / 1000.0)
+                    break
+            else:
+                run_length = 0
+        
+        return float(settling_time) if settling_time is not None else None
 
     def _calculate_overshoot(self):
         """Overshoot 계산"""
@@ -407,10 +1751,10 @@ class ControlPerformanceLogger:
         return 0.0
 
     def _calculate_control_effort(self):
-        """Control Effort 계산 (RL residual의 총합)"""
-        if not self.control_effort_data:
+        """Control Effort 계산 (실제 제어 입력의 RMS)"""
+        if not self.pi_output_data:
             return None
-        return float(np.sum(np.abs(self.control_effort_data)))
+        return float(np.sqrt(np.mean(np.array(self.pi_output_data)**2)))
 
     def _calculate_residual_effectiveness(self):
         """Residual Effectiveness 계산 (RL residual과 오차의 상관계수)"""
@@ -445,6 +1789,106 @@ class ControlPerformanceLogger:
         x = np.arange(len(rmse_values))
         slope = np.polyfit(x, rmse_values, 1)[0]
         return float(slope)
+    
+    # =========================
+    # 추가 제어공학 지표 계산 메서드들
+    # =========================
+    
+    def _calculate_iae(self):
+        """IAE (Integral Absolute Error) 계산 - 연마 공정에서 편차 누적"""
+        if not self.error_data or not self.time_data:
+            return None
+        dt = np.mean(np.diff(self.time_data)) if len(self.time_data) > 1 else 0.001
+        return float(np.sum(np.abs(self.error_data)) * dt)
+    
+    def _calculate_ise(self):
+        """ISE (Integral Square Error) 계산 - 큰 오차에 민감"""
+        if not self.error_data or not self.time_data:
+            return None
+        dt = np.mean(np.diff(self.time_data)) if len(self.time_data) > 1 else 0.001
+        return float(np.sum(np.square(self.error_data)) * dt)
+    
+    def _calculate_itae(self):
+        """ITAE (Integral Time Absolute Error) 계산 - 후반 안정성 강조"""
+        if not self.error_data or not self.time_data:
+            return None
+        dt = np.mean(np.diff(self.time_data)) if len(self.time_data) > 1 else 0.001
+        time_array = np.array(self.time_data)
+        return float(np.sum(np.abs(self.error_data) * time_array) * dt)
+    
+    def _calculate_itse(self):
+        """ITSE (Integral Time Square Error) 계산 - 시간 가중 제곱 오차"""
+        if not self.error_data or not self.time_data:
+            return None
+        dt = np.mean(np.diff(self.time_data)) if len(self.time_data) > 1 else 0.001
+        time_array = np.array(self.time_data)
+        return float(np.sum(np.square(self.error_data) * time_array) * dt)
+    
+    def _calculate_input_rms(self):
+        """Input RMS 계산 - PID gain 합의 RMS 값 (제어 노력 분리)"""
+        if not self.input_data:
+            return None
+        arr = np.asarray(self.input_data, dtype=np.float32)
+        return float(np.sqrt(np.mean(np.square(arr))))
+    
+    def _calculate_total_variation(self):
+        """Total Variation 계산 - 실제 제어 출력 변화 총량 (밸브 마모와 직결)"""
+        if len(self.pi_output_data) < 2:
+            return None
+        return float(np.sum(np.abs(np.diff(self.pi_output_data))))
+    
+    def _calculate_out_of_band_time(self):
+        """Out of Band Time 계산 - 목표 범위 밖 체류 시간"""
+        if not self.force_data or not self.target_data or not self.time_data:
+            return None
+        target = self.target_data[0]
+        tolerance = 1.0  # ±1N 오차 범위
+        force_array = np.array(self.force_data)
+        time_array = np.array(self.time_data)
+        
+        out_of_range = np.abs(force_array - target) > tolerance
+        if len(out_of_range) > 0:
+            dt = np.mean(np.diff(time_array)) if len(time_array) > 1 else 0.001
+            return float(np.sum(out_of_range) * dt)
+        return 0.0
+    
+    def _calculate_success_rate(self):
+        """Success Rate 계산 - 목표 범위 내 유지 비율"""
+        if not self.force_data or not self.target_data or not self.time_data:
+            return None
+        target = self.target_data[0]
+        tolerance = 1.0  # ±1N 오차 범위 (매우 엄격한 제어)  # ±5% 오차 범위
+        in_band = np.abs(np.array(self.force_data) - target) <= tolerance
+        return float(np.sum(in_band) / len(in_band))
+    
+    def _calculate_error_variance(self):
+        """Error Variance 계산 - 오차 분산 (안정성 지표)"""
+        if not self.error_data:
+            return None
+        return float(np.var(self.error_data))
+    
+    def _calculate_peak_count(self):
+        """Peak Count 계산 - 피크 수 (링잉 정도)"""
+        if len(self.force_data) < 3:
+            return None
+        
+        try:
+            from scipy.signal import find_peaks
+            peaks, _ = find_peaks(self.force_data, height=np.mean(self.force_data))
+            return len(peaks)
+        except ImportError:
+            # scipy가 없는 경우 간단한 피크 검출
+            force_array = np.array(self.force_data)
+            mean_force = np.mean(force_array)
+            peaks = 0
+            
+            # 간단한 피크 검출 알고리즘
+            for i in range(1, len(force_array) - 1):
+                if (force_array[i] > force_array[i-1] and 
+                    force_array[i] > force_array[i+1] and 
+                    force_array[i] > mean_force):
+                    peaks += 1
+            return peaks
 
     def save_episode_metrics(self, episode_num):
         """에피소드별 지표를 CSV로 저장"""
@@ -467,7 +1911,7 @@ class ControlPerformanceLogger:
                 writer.writerow([episode_num, value])
 
     def save_performance_summary(self):
-        """전체 성능 요약 저장"""
+        """전체 성능 요약 저장 (18개 제어공학 지표)"""
         if not self.episode_metrics:
             return
             
@@ -475,11 +1919,23 @@ class ControlPerformanceLogger:
         
         with open(summary_path, mode="w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["Metric", "Mean", "Std", "Min", "Max", "Unit"])
+            writer.writerow(["Metric", "Mean", "Std", "Min", "Max", "Unit", "Description"])
             
-            # 각 지표별 통계 계산
-            for metric_name in ['rmse', 'sse', 'rise_time', 'settling_time', 'overshoot', 
-                              'control_effort', 'residual_effectiveness', 'pi_rl_synergy', 'learning_progress']:
+            # 모든 지표별 통계 계산 (기본 + 추가)
+            all_metrics = [
+                # 기본 지표들
+                'rmse', 'steady_state_error', 'rise_time', 'settling_time', 'overshoot', 'control_effort',
+                # 추가 추종 성능 지표
+                'iae', 'ise', 'itae', 'itse',
+                # 제어 노력 지표
+                'input_rms', 'total_variation', 'out_of_band_time',
+                # 안정성 지표
+                'success_rate', 'error_variance', 'peak_count',
+                # 기존 지표들
+                'residual_effectiveness', 'pi_rl_synergy', 'learning_progress'
+            ]
+            
+            for metric_name in all_metrics:
                 values = [ep[metric_name] for ep in self.episode_metrics if ep[metric_name] is not None]
                 
                 if values:
@@ -489,73 +1945,457 @@ class ControlPerformanceLogger:
                         f"{np.std(values):.4f}",
                         f"{np.min(values):.4f}",
                         f"{np.max(values):.4f}",
-                        self._get_metric_unit(metric_name)
+                        self._get_metric_unit(metric_name),
+                        self._get_metric_description(metric_name)
                     ])
+        
+        print(f"📊 성능 요약 저장 완료: {summary_path}")
 
     def _get_metric_unit(self, metric_name):
         """지표별 단위 반환"""
         units = {
+            # 기본 지표들
             'rmse': 'N',
-            'sse': 'N', 
+            'steady_state_error': 'N', 
             'rise_time': 's',
             'settling_time': 's',
             'overshoot': '%',
-            'control_effort': 'MPa·s',
+            'control_effort': 'arb.',
             'residual_effectiveness': '-',
             'pi_rl_synergy': '-',
-            'learning_progress': 'N/episode'
+            'learning_progress': 'N/episode',
+            # 추가 추종 성능 지표
+            'iae': 'N·s',
+            'ise': 'N²·s',
+            'itae': 'N·s²',
+            'itse': 'N²·s²',
+            # 제어 노력 지표
+            'input_rms': 'N',
+            'total_variation': 'N',
+            'out_of_band_time': 's',
+            # 안정성 지표
+            'success_rate': '-',
+            'error_variance': 'N²',
+            'peak_count': 'count'
         }
         return units.get(metric_name, '')
+    
+    def _get_metric_description(self, metric_name):
+        """지표별 설명 반환"""
+        descriptions = {
+            # 기본 지표들
+            'rmse': 'Root Mean Square Error - 제어 정확도',
+            'steady_state_error': 'Steady State Error - 정상상태 오차',
+            'rise_time': 'Rise Time - 상승시간 (10%→90%)',
+            'settling_time': 'Settling Time - 정착시간 (±5%)',
+            'overshoot': 'Overshoot - 오버슈트 (%)',
+            'control_effort': 'Control Effort - 제어 노력',
+            'residual_effectiveness': 'Residual Effectiveness - 잔여 효과성',
+            'pi_rl_synergy': 'PI-RL Synergy - PI-RL 시너지',
+            'learning_progress': 'Learning Progress - 학습 진행도',
+            # 추가 추종 성능 지표
+            'iae': 'Integral Absolute Error - 절대 오차 적분',
+            'ise': 'Integral Square Error - 제곱 오차 적분',
+            'itae': 'Integral Time Absolute Error - 시간 가중 절대 오차 적분',
+            'itse': 'Integral Time Square Error - 시간 가중 제곱 오차 적분',
+            # 제어 노력 지표
+            'input_rms': 'Input RMS - 제어 입력 RMS',
+            'total_variation': 'Total Variation - 총 변화량 (밸브 마모)',
+            'out_of_band_time': 'Out of Band Time - 밴드 이탈 시간',
+            # 안정성 지표
+            'success_rate': 'Success Rate - 성공률 (목표 범위 유지)',
+            'error_variance': 'Error Variance - 오차 분산 (안정성)',
+            'peak_count': 'Peak Count - 피크 수 (링잉 정도)'
+        }
+        return descriptions.get(metric_name, '')
 
     def generate_plots(self):
-        """각 지표별 시각화 생성"""
+        """각 지표별 시각화 생성 (18개 제어공학 지표)"""
         if not self.episode_metrics:
             return
             
-        for metric_name in ['rmse', 'sse', 'rise_time', 'settling_time', 'overshoot', 
-                          'control_effort', 'residual_effectiveness', 'pi_rl_synergy', 'learning_progress']:
+        print("📈 논문용 고품질 그래프 생성 중...")
+        
+        # 모든 지표들 (기본 + 추가)
+        all_metrics = [
+            # 기본 지표들
+            'rmse', 'steady_state_error', 'rise_time', 'settling_time', 'overshoot', 'control_effort',
+            # 추가 추종 성능 지표
+            'iae', 'ise', 'itae', 'itse',
+            # 제어 노력 지표
+            'input_rms', 'total_variation', 'out_of_band_time',
+            # 안정성 지표
+            'success_rate', 'error_variance', 'peak_count',
+            # 기존 지표들
+            'residual_effectiveness', 'pi_rl_synergy', 'learning_progress'
+        ]
+        
+        for metric_name in all_metrics:
             self._plot_metric(metric_name)
+        
+        # 추가로 종합 대시보드 생성
+        self._generate_comprehensive_dashboard()
+        
+        # Step 축 지표들도 생성 (논문용)
+        self._generate_step_based_plots()
+        
+        print(f"✅ 총 {len(all_metrics)}개 지표 그래프 생성 완료")
 
     def _plot_metric(self, metric_name):
-        """개별 지표 시각화"""
+        """개별 지표 시각화 (논문용 고품질)"""
         values = [ep[metric_name] for ep in self.episode_metrics if ep[metric_name] is not None]
         episodes = [ep['episode'] for ep in self.episode_metrics if ep[metric_name] is not None]
         
         if not values:
             return
             
-        plt.figure(figsize=(10, 6))
-        plt.plot(episodes, values, 'b-', linewidth=2, marker='o', markersize=4)
-        plt.xlabel('Episode', fontsize=12)
-        plt.ylabel(f'{metric_name.upper()}', fontsize=12)
-        plt.title(f'{metric_name.upper()} Over Episodes', fontsize=14, fontweight='bold')
-        plt.grid(True, alpha=0.3)
+        # 폰트 설정 재적용 (각 그래프마다)
+        self._setup_fonts()
+            
+        plt.figure(figsize=(12, 8))
+        plt.plot(episodes, values, 'b-', linewidth=3, marker='o', markersize=6, 
+                markerfacecolor='blue', markeredgecolor='darkblue', markeredgewidth=1)
+        plt.xlabel('Episode Number', fontweight='bold')
+        plt.ylabel(f'{metric_name.upper()}', fontweight='bold')
+        plt.title(f'{metric_name.upper()} Over Episodes', fontweight='bold')
+        plt.grid(True, alpha=0.3, linestyle='-', linewidth=0.5)
         
         # 평균선 추가
         if len(values) > 1:
             avg_value = np.mean(values)
-            plt.axhline(y=avg_value, color='r', linestyle='--', alpha=0.7, 
-                       label=f'Average: {avg_value:.4f}')
-            plt.legend()
+            std_value = np.std(values)
+            plt.axhline(y=avg_value, color='r', linestyle='--', alpha=0.8, linewidth=2,
+                       label=f'Mean: {avg_value:.4f}±{std_value:.4f}')
+            plt.legend(loc='best', frameon=True, fancybox=True, shadow=True)
+        
+        # 축 범위 조정
+        plt.xlim(min(episodes) - 0.5, max(episodes) + 0.5)
         
         png_path = os.path.join(self.control_perf_dir, f"{metric_name}.png")
         plt.tight_layout()
-        plt.savefig(png_path, dpi=300, bbox_inches='tight')
+        plt.savefig(png_path, dpi=300, bbox_inches='tight', facecolor='white', edgecolor='none')
         plt.close()
+        
+        print(f"  📊 {metric_name.upper()} 그래프 저장: {png_path}")
+    
+    def _generate_comprehensive_dashboard(self):
+        """종합 대시보드 생성 (논문용)"""
+        if len(self.episode_metrics) < 2:
+            return
+        
+        # 폰트 설정 재적용
+        self._setup_fonts()
+        
+        # 4x4 서브플롯 생성
+        fig, axes = plt.subplots(4, 4, figsize=(20, 16))
+        fig.suptitle('PID Gain Optimization Performance Dashboard', fontweight='bold', fontsize=36)
+        
+        # 주요 지표들 선택
+        key_metrics = [
+            'rmse', 'iae', 'ise', 'itae',
+            'rise_time', 'settling_time', 'overshoot', 'success_rate',
+            'input_rms', 'total_variation', 'out_of_band_time', 'error_variance',
+            'control_effort', 'peak_count', 'residual_effectiveness', 'learning_progress'
+        ]
+        
+        for i, metric_name in enumerate(key_metrics):
+            row, col = i // 4, i % 4
+            ax = axes[row, col]
+            
+            values = [ep[metric_name] for ep in self.episode_metrics if ep[metric_name] is not None]
+            episodes = [ep['episode'] for ep in self.episode_metrics if ep[metric_name] is not None]
+            
+            if values:
+                ax.plot(episodes, values, 'b-', linewidth=2, marker='o', markersize=4)
+                ax.set_title(f'{metric_name.upper()}', fontweight='bold')
+                ax.grid(True, alpha=0.3)
+                
+                # 평균선 추가
+                if len(values) > 1:
+                    avg_value = np.mean(values)
+                    ax.axhline(y=avg_value, color='r', linestyle='--', alpha=0.7)
+            else:
+                ax.text(0.5, 0.5, 'No Data', ha='center', va='center', transform=ax.transAxes)
+                ax.set_title(f'{metric_name.upper()}', fontweight='bold')
+        
+        # 빈 서브플롯 숨기기
+        for i in range(len(key_metrics), 16):
+            row, col = i // 4, i % 4
+            axes[row, col].set_visible(False)
+        
+        dashboard_path = os.path.join(self.control_perf_dir, "comprehensive_dashboard.png")
+        plt.tight_layout()
+        plt.savefig(dashboard_path, dpi=300, bbox_inches='tight', facecolor='white', edgecolor='none')
+        plt.close()
+        
+        print(f"📊 종합 대시보드 저장: {dashboard_path}")
+    
+    def _generate_step_based_plots(self):
+        """Step 축 지표 그래프 생성 (논문용 - 에피소드 내부 시간적 추세)"""
+        if not self.time_data or not self.force_data:
+            return
+        
+        print("📈 Step 축 지표 그래프 생성 중...")
+        
+        # 폰트 설정 재적용
+        self._setup_fonts()
+        
+        # 1. Force Tracking Curve (목표힘 vs 실제힘)
+        self._plot_force_tracking_curve()
+        
+        # 2. Error Time Series (순간 오차)
+        self._plot_error_time_series()
+        
+        # 3. Control Input Time Series (제어 입력)
+        self._plot_control_input_series()
+        
+        # 4. Reward Breakdown (보상 구성 요소)
+        self._plot_reward_breakdown()
+        
+        # 5. Step 축 종합 대시보드
+        self._generate_step_dashboard()
+        
+        print("✅ Step 축 지표 그래프 생성 완료")
+    
+    def _plot_force_tracking_curve(self):
+        """Force Tracking Curve (목표힘 vs 실제힘)"""
+        if not self.force_data or not self.target_data or not self.time_data:
+            return
+        
+        plt.figure(figsize=(14, 8))
+        time_array = np.array(self.time_data)
+        force_array = np.array(self.force_data)
+        target_array = np.array(self.target_data)
+        
+        plt.plot(time_array, target_array, 'r--', linewidth=3, label='Target Force', alpha=0.8)
+        plt.plot(time_array, force_array, 'b-', linewidth=2, label='Actual Force', alpha=0.9)
+        tolerance = 0.05 * target_array[0] if len(target_array) > 0 else 2.25
+        plt.fill_between(time_array, target_array - tolerance, target_array + tolerance, 
+                        alpha=0.2, color='green', label='±5% Tolerance Band')
+        
+        plt.xlabel('Time (s)', fontweight='bold')
+        plt.ylabel('Force (N)', fontweight='bold')
+        plt.title('Force Tracking Performance (Step-based)', fontweight='bold')
+        plt.legend(loc='best', frameon=True, fancybox=True, shadow=True)
+        plt.grid(True, alpha=0.3)
+        
+        png_path = os.path.join(self.control_perf_dir, "force_tracking_curve.png")
+        plt.tight_layout()
+        plt.savefig(png_path, dpi=300, bbox_inches='tight', facecolor='white', edgecolor='none')
+        plt.close()
+        
+        print(f"  📊 Force Tracking Curve 저장: {png_path}")
+    
+    def _plot_error_time_series(self):
+        """Error Time Series (순간 오차)"""
+        if not self.error_data or not self.time_data:
+            return
+        
+        plt.figure(figsize=(14, 8))
+        time_array = np.array(self.time_data)
+        error_array = np.array(self.error_data)
+        target_array = np.array(self.target_data)
+        
+        plt.plot(time_array, error_array, 'r-', linewidth=2, label='Absolute Error')
+        tolerance = 0.05 * target_array[0] if len(target_array) > 0 else 2.25
+        plt.axhline(y=tolerance, color='g', linestyle='--', alpha=0.7, label='±5% Tolerance')
+        plt.axhline(y=-tolerance, color='g', linestyle='--', alpha=0.7)
+        plt.fill_between(time_array, -tolerance, tolerance, alpha=0.1, color='green', label='Tolerance Band')
+        
+        plt.xlabel('Time (s)', fontweight='bold')
+        plt.ylabel('Force Error (N)', fontweight='bold')
+        plt.title('Force Error Time Series (Step-based)', fontweight='bold')
+        plt.legend(loc='best', frameon=True, fancybox=True, shadow=True)
+        plt.grid(True, alpha=0.3)
+        
+        png_path = os.path.join(self.control_perf_dir, "error_time_series.png")
+        plt.tight_layout()
+        plt.savefig(png_path, dpi=300, bbox_inches='tight', facecolor='white', edgecolor='none')
+        plt.close()
+        
+        print(f"  📊 Error Time Series 저장: {png_path}")
+    
+    def _plot_control_input_series(self):
+        """Control Input Time Series (제어 입력)"""
+        if not self.input_data or not self.time_data:
+            return
+        
+        plt.figure(figsize=(14, 8))
+        time_array = np.array(self.time_data)
+        input_array = np.array(self.input_data)
+        
+        plt.plot(time_array, input_array, 'purple', linewidth=2, label='Control Input (PID Gain Sum)')
+        plt.xlabel('Time (s)', fontweight='bold')
+        plt.ylabel('Control Input', fontweight='bold')
+        plt.title('Control Input Time Series (Step-based)', fontweight='bold')
+        plt.legend(loc='best', frameon=True, fancybox=True, shadow=True)
+        plt.grid(True, alpha=0.3)
+        
+        png_path = os.path.join(self.control_perf_dir, "control_input_series.png")
+        plt.tight_layout()
+        plt.savefig(png_path, dpi=300, bbox_inches='tight', facecolor='white', edgecolor='none')
+        plt.close()
+        
+        print(f"  📊 Control Input Series 저장: {png_path}")
+    
+    def _plot_reward_breakdown(self):
+        """Reward Breakdown (보상 구성 요소) - Step 단위"""
+        if not self.time_data or not self.force_data or not self.target_data:
+            return
+        
+        # Step 단위 보상 구성 요소 계산
+        time_array = np.array(self.time_data)
+        force_array = np.array(self.force_data)
+        target_array = np.array(self.target_data)
+        error_array = np.abs(force_array - target_array)
+        
+        # 1. Progress Reward (목표에 가까워질수록 높은 보상)
+        progress_reward = np.exp(-error_array / 5.0)  # 오차가 작을수록 높은 보상
+        
+        # 2. In-band Reward (±5% 범위 내에 있을 때 보상)
+        tolerance = target_array[0] * 0.05
+        in_band = np.abs(force_array - target_array) <= tolerance
+        in_band_reward = in_band.astype(float)
+        
+        # 3. Error Penalty (오차에 대한 페널티)
+        error_penalty = -error_array / 10.0
+        
+        # 4. Stability Reward (안정성 보상)
+        if len(error_array) > 1:
+            error_derivative = np.abs(np.diff(error_array, prepend=error_array[0]))
+            stability_reward = np.exp(-error_derivative / 2.0)
+        else:
+            stability_reward = np.ones_like(error_array)
+        
+        plt.figure(figsize=(16, 10))
+        
+        # 서브플롯 1: Progress Reward
+        plt.subplot(2, 2, 1)
+        plt.plot(time_array, progress_reward, 'b-', linewidth=2)
+        plt.title('Progress Reward (Step-based)', fontweight='bold')
+        plt.xlabel('Time (s)')
+        plt.ylabel('Progress Reward')
+        plt.grid(True, alpha=0.3)
+        
+        # 서브플롯 2: In-band Reward
+        plt.subplot(2, 2, 2)
+        plt.plot(time_array, in_band_reward, 'g-', linewidth=2)
+        plt.title('In-band Reward (Step-based)', fontweight='bold')
+        plt.xlabel('Time (s)')
+        plt.ylabel('In-band Reward')
+        plt.grid(True, alpha=0.3)
+        
+        # 서브플롯 3: Error Penalty
+        plt.subplot(2, 2, 3)
+        plt.plot(time_array, error_penalty, 'r-', linewidth=2)
+        plt.title('Error Penalty (Step-based)', fontweight='bold')
+        plt.xlabel('Time (s)')
+        plt.ylabel('Error Penalty')
+        plt.grid(True, alpha=0.3)
+        
+        # 서브플롯 4: Stability Reward
+        plt.subplot(2, 2, 4)
+        plt.plot(time_array, stability_reward, 'purple', linewidth=2)
+        plt.title('Stability Reward (Step-based)', fontweight='bold')
+        plt.xlabel('Time (s)')
+        plt.ylabel('Stability Reward')
+        plt.grid(True, alpha=0.3)
+        
+        png_path = os.path.join(self.control_perf_dir, "reward_breakdown_step.png")
+        plt.tight_layout()
+        plt.savefig(png_path, dpi=300, bbox_inches='tight', facecolor='white', edgecolor='none')
+        plt.close()
+        
+        print(f"  📊 Reward Breakdown 저장: {png_path}")
+    
+    def _generate_step_dashboard(self):
+        """Step 축 종합 대시보드"""
+        if not self.time_data or not self.force_data:
+            return
+        
+        # 폰트 설정 재적용
+        self._setup_fonts()
+        
+        # 2x2 서브플롯 생성
+        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+        fig.suptitle('Step-based Performance Dashboard', fontweight='bold', fontsize=36)
+        
+        time_array = np.array(self.time_data)
+        force_array = np.array(self.force_data)
+        target_array = np.array(self.target_data)
+        error_array = np.array(self.error_data)
+        
+        # 1. Force Tracking
+        axes[0, 0].plot(time_array, target_array, 'r--', linewidth=2, label='Target')
+        axes[0, 0].plot(time_array, force_array, 'b-', linewidth=1.5, label='Actual')
+        axes[0, 0].set_title('Force Tracking', fontweight='bold')
+        axes[0, 0].set_xlabel('Time (s)')
+        axes[0, 0].set_ylabel('Force (N)')
+        axes[0, 0].legend()
+        axes[0, 0].grid(True, alpha=0.3)
+        
+        # 2. Error Time Series
+        axes[0, 1].plot(time_array, error_array, 'r-', linewidth=1.5)
+        target_array = np.array(self.target_data)
+        tolerance = 0.05 * target_array[0] if len(target_array) > 0 else 2.25
+        axes[0, 1].axhline(y=tolerance, color='g', linestyle='--', alpha=0.7)
+        axes[0, 1].axhline(y=-tolerance, color='g', linestyle='--', alpha=0.7)
+        axes[0, 1].set_title('Error Time Series', fontweight='bold')
+        axes[0, 1].set_xlabel('Time (s)')
+        axes[0, 1].set_ylabel('Error (N)')
+        axes[0, 1].grid(True, alpha=0.3)
+        
+        # 3. Control Input
+        if self.input_data:
+            input_array = np.array(self.input_data)
+            axes[1, 0].plot(time_array, input_array, 'purple', linewidth=1.5)
+            axes[1, 0].set_title('Control Input', fontweight='bold')
+            axes[1, 0].set_xlabel('Time (s)')
+            axes[1, 0].set_ylabel('Input')
+            axes[1, 0].grid(True, alpha=0.3)
+        
+        # 4. Error Distribution
+        axes[1, 1].hist(error_array, bins=50, alpha=0.7, color='skyblue', edgecolor='black')
+        target_array = np.array(self.target_data)
+        tolerance = 0.05 * target_array[0] if len(target_array) > 0 else 2.25
+        axes[1, 1].axvline(x=tolerance, color='r', linestyle='--', alpha=0.7, label='±5% Tolerance')
+        axes[1, 1].axvline(x=-tolerance, color='r', linestyle='--', alpha=0.7)
+        axes[1, 1].set_title('Error Distribution', fontweight='bold')
+        axes[1, 1].set_xlabel('Error (N)')
+        axes[1, 1].set_ylabel('Frequency')
+        axes[1, 1].legend()
+        axes[1, 1].grid(True, alpha=0.3)
+        
+        dashboard_path = os.path.join(self.control_perf_dir, "step_dashboard.png")
+        plt.tight_layout()
+        plt.savefig(dashboard_path, dpi=300, bbox_inches='tight', facecolor='white', edgecolor='none')
+        plt.close()
+        
+        print(f"📊 Step 축 대시보드 저장: {dashboard_path}")
 
     def reset_episode_data(self):
-        """에피소드 데이터 초기화"""
+        """에피소드 데이터 초기화 (모든 데이터 변수 포함)"""
+        # 기본 데이터
         self.time_data.clear()
         self.force_data.clear()
         self.target_data.clear()
         self.error_data.clear()
         self.control_effort_data.clear()
         self.pi_output_data.clear()
+        
+        # 추가 지표용 데이터
+        self.pid_gains_history.clear()
+        self.input_data.clear()
 
-# ==== ADDED: Learning Done Logger ====
+# =========================
+# Learning Done Logger
+# =========================
 class LearningDoneLogger:
     """
     학습 완료 시 전체 로깅을 관리하는 클래스
+    - 에피소드 보상 데이터 복사
+    - 보상 분석 데이터 복사
+    - 학습 결과 통합 저장
     """
     def __init__(self, log_dir):
         self.base_log_dir = log_dir
@@ -598,11 +2438,16 @@ class LearningDoneLogger:
             dst_file = os.path.join(self.reward_breakdown_dir, filename)
             shutil.copy2(src_file, dst_file)
 
-# ==== ADDED: Reward Breakdown Logger ====
+# =========================
+# Reward Breakdown Logger
+# =========================
 class RewardBreakdownLogger:
     """
-    스텝 단위 보상 항목 로깅을 메모리에 모아두고
-    Ctrl+C나 강화학습 완료 시 CSV 저장 + PNG 시각화를 수행
+    스텝 단위 보상 분석 로깅
+    - 실시간 보상 구성 요소 수집
+    - 에피소드별 보상 통계 생성
+    - CSV 저장 및 PNG 시각화
+    - Ctrl+C/학습 완료 시 자동 저장
     """
     def __init__(self, log_dir):
         self.base_log_dir = log_dir
@@ -768,10 +2613,7 @@ class RewardBreakdownLogger:
         if not self.rows:
             return
             
-        # CSV Append
-        self._write_csv_append()
-        
-        # ==== ADDED: reward_breakdown CSV 저장 ====
+        # CSV 저장 (overwrite 방식으로 통일)
         self.save_reward_breakdown_csv()
         
         # 에피소드별 보상 저장 (제공된 경우)
@@ -798,1105 +2640,30 @@ class RewardBreakdownLogger:
         self.rows.clear()
 
 # =========================
-# Residual SAC Agent
-# =========================   
-class ResidualSACAgent:
-    def __init__(self, cfg=None):
-        if cfg is None:
-            raise ValueError("cfg 파라미터가 필요합니다")
-        self.cfg = cfg
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        s_dim, a_dim, hidden = cfg["STATE_DIM"], cfg["ACTION_DIM"], cfg["HIDDEN"]
-        self.gamma, self.tau = cfg["GAMMA"], cfg["TAU"]
-        self.alpha = 0.05
-        self.auto_entropy_tuning = cfg["AUTO_ENTROPY"]
-        self.actor = Actor(s_dim, a_dim, hidden).to(self.device)
-        self.critic = Critic(s_dim, a_dim, hidden).to(self.device)
-        self.critic_target = Critic(s_dim, a_dim, hidden).to(self.device)
-        self.critic_target.load_state_dict(self.critic.state_dict())
-        self.actor_opt = optim.Adam(self.actor.parameters(), lr=cfg["LR"])
-        self.critic_opt = optim.Adam(self.critic.parameters(), lr=cfg["LR"])
-        if self.auto_entropy_tuning:
-            self.target_entropy = -torch.prod(torch.tensor([a_dim], device=self.device)).item()
-            self.log_alpha = torch.zeros(1, requires_grad=True, device=self.device)
-            self.alpha_opt = optim.Adam([self.log_alpha], lr=cfg["LR"])
-        self.replay = ReplayBuffer()
-        self.total_steps = 0
-        self.episode_rewards = []
-        self.max_rewards_history = cfg.get("MAX_EPISODE_REWARDS_HISTORY", 1000)
-
-    def select_action(self, state, evaluate=False):
-        state = torch.FloatTensor(state.reshape(1, -1)).to(self.device)
-        with torch.no_grad():
-            if evaluate:
-                mean, _ = self.actor(state)
-                action = torch.tanh(mean)
-            else:
-                action, log_prob = self.actor.sample(state)
-        action = action.cpu().numpy().flatten()
-        return float(action[0] * (self.cfg["R_MAX"]))
-    
-    def store_transition(self, state, action, reward, next_state, done):
-        norm_action = action / self.cfg["R_MAX"]
-        self.replay.push(state, norm_action, reward, next_state, done)
-
-    def update_parameters(self, batch_size=None):
-        bs = batch_size or self.cfg["BATCH_SIZE"]
-        if len(self.replay) < bs: return
-
-        s, a, r, ns, d = self.replay.sample(bs)
-        s = torch.FloatTensor(s).to(self.device)
-        a = torch.FloatTensor(a).to(self.device)
-        r = torch.FloatTensor(r).unsqueeze(1).to(self.device)
-        ns = torch.FloatTensor(ns).to(self.device)
-        d = torch.FloatTensor(d).unsqueeze(1).to(self.device)
-
-        with torch.no_grad():
-            na, nlogp = self.actor.sample(ns)
-            q1n, q2n = self.critic_target(ns, na)
-            min_qn = torch.min(q1n, q2n) - self.alpha * nlogp
-            y = r + (1 - d) * self.gamma * min_qn
-
-        q1, q2 = self.critic(s, a)
-        q_loss = F.mse_loss(q1, y) + F.mse_loss(q2, y)
-        self.critic_opt.zero_grad()
-        q_loss.backward()
-        nn.utils.clip_grad_norm_(self.critic.parameters(), 1.0)
-        self.critic_opt.step()
-
-        pi, logp = self.actor.sample(s)
-        q1_pi, q2_pi = self.critic(s, pi)
-        min_q_pi = torch.min(q1_pi, q2_pi)
-        pi_loss = ((self.alpha * logp) - min_q_pi).mean()
-        self.actor_opt.zero_grad()
-        pi_loss.backward()
-        nn.utils.clip_grad_norm_(self.actor.parameters(), 1.0)
-        self.actor_opt.step()
-
-        if self.auto_entropy_tuning:
-            logp_entropy = logp.squeeze(1)
-            a_loss = -(self.log_alpha * (logp_entropy + self.target_entropy).detach()).mean()
-            self.alpha_opt.zero_grad(); a_loss.backward(); self.alpha_opt.step()
-            self.alpha = self.log_alpha.exp()
-
-        with torch.no_grad():
-            for tp, lp in zip(self.critic_target.parameters(), self.critic.parameters()):
-                tp.data.copy_(self.tau * lp.data + (1 - self.tau) * tp.data)
-
-    def save_model(self, path):
-        torch.save({
-            "actor": self.actor.state_dict(),
-            "critic": self.critic.state_dict(),
-            "critic_target": self.critic_target.state_dict(),
-            "actor_opt": self.actor_opt.state_dict(),
-            "critic_opt": self.critic_opt.state_dict(),
-            "total_steps": self.total_steps,
-            "episode_rewards": self.episode_rewards,
-        }, path)
-        print(f"💾 Saved: {path}")
-
-# =========================
-# TCP Communicator
-# =========================
-class ResidualRLCommunicator:
-    def __init__(self, host, port, recv_timeout, recv_loop_timeout=0.05, cfg=None):
-        self.host, self.port = host, port 
-        self.recv_timeout = recv_timeout
-        self.recv_loop_timeout = recv_loop_timeout
-        self.cfg = cfg
-        self.socket = None
-        self.conn = None
-        self.connected = False
-        self.CPP_TO_PY_PACKET_FORMAT = ">HffffffBH"
-        self.CPP_TO_PY_PACKET_SIZE = 29
-        self.CPP_TO_PY_SOF = 0xAAAA
-        self.PY_TO_CPP_PACKET_FORMAT = ">HfBBBH"  # SOF, rl_residual, timing_accurate, episode_done, learning_done, checksum
-        self.PY_TO_CPP_PACKET_SIZE = 11  # SOF(2) + rl_residual(4) + timing_accurate(1) + episode_done(1) + learning_done(1) + checksum(2) = 11 bytes
-        self.PY_TO_CPP_SOF = 0xBBBB
-        self.latest_state = None
-        self.latest_sander_active = False
-        self.receive_thread = None
-        self.is_receiving = False
-        self.state_lock = threading.Lock()
-        self.stats_lock = threading.Lock()
-        self.packets_received = 0
-        self.packets_sent = 0
-        self.connection_start_time = None
-        self.last_packet_time = None
-        self.consecutive_failures = 0
-        self.old_data_warning_logged = False  # 오래된 데이터 경고 중복 방지
-
-    def _log(self, level, message):
-        Logger.log(level, message)
-
-    def connect(self):
-        try:
-            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.socket.bind((self.host, self.port))
-            self.socket.listen(1)
-            self.socket.settimeout(1.0)
-            self._log("INFO", f"로봇제어PC 연결 대기 중 {self.host}:{self.port} ...")
-            while True:
-                try:
-                    conn, addr = self.socket.accept()
-                    break
-                except socket.timeout:
-                    continue
-                except KeyboardInterrupt:
-                    self._log("WARNING", "사용자에 의해 연결 취소됨")
-                    return False
-            conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            conn.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-            conn.settimeout(self.recv_timeout)
-            self._log("SUCCESS", f"연결 성공: {addr}")
-            self.conn = conn
-            self.connected = True
-            self.connection_start_time = time.perf_counter()
-            self.start_receiving()
-            return True
-        except KeyboardInterrupt:
-            self._log("WARNING", "사용자에 의해 연결 취소됨")
-            return False
-        except Exception as e:
-            self._log("ERROR", f"연결 오류: {e}")
-            return False
-        
-    def start_receiving(self):
-        self.is_receiving = True
-        self.receive_thread = threading.Thread(target=self._receive_loop, daemon=True)
-        self.receive_thread.start()
-        self._log("INFO", f"{self.cfg['RECV_FREQ_HZ']}Hz 수신 스레드 시작")
-
-    def _receive_loop(self):
-        next_receive_time = time.perf_counter()
-        recv_interval = self.cfg["RECV_INTERVAL_SEC"]
-        while self.is_receiving:
-            current_time = time.perf_counter()
-            if current_time >= next_receive_time:
-                next_receive_time += recv_interval
-                try:
-                    self.conn.settimeout(self.recv_loop_timeout)
-                    data = self._recv_exact(self.CPP_TO_PY_PACKET_SIZE)
-                    if data:
-                        state, sander_active = self._process_packet(data)
-                        if state is not None:
-                            with self.state_lock:
-                                self.latest_state = state
-                                self.latest_sander_active = sander_active
-                                self.last_packet_time = time.perf_counter()
-                            self.consecutive_failures = 0
-                except socket.timeout:
-                    pass
-                except Exception as e:
-                    self.consecutive_failures += 1
-                    self._log("WARNING", f"수신 루프 오류 ({self.consecutive_failures}회): {e}")
-                    if self.consecutive_failures >= 5:
-                        self._log("ERROR", "연속 수신 실패로 수신 루프 중단")
-                        break
-                    time.sleep(self.cfg["RECV_INTERVAL_SEC"])
-            else:
-                time.sleep(0.001)
-        self._log("INFO", "수신 루프 종료")
-
-    def _recv_exact(self, nbytes):
-        data = b''
-        while len(data) < nbytes:
-            chunk = self.conn.recv(nbytes - len(data))
-            if not chunk:
-                return None
-            data += chunk
-        return data
-    
-    def _process_packet(self, data):
-        try:
-            if len(data) != self.CPP_TO_PY_PACKET_SIZE:
-                self._log("WARNING", f"예상 {self.CPP_TO_PY_PACKET_SIZE}B, 수신 {len(data)}B")
-                return None, False
-            try:
-                (sof, current_force, target_force, force_error, force_error_dot, 
-                 force_error_int, pi_output, sander_active, 
-                 received_checksum) = struct.unpack(">HffffffBH", data)
-            except struct.error as e:
-                self._log("ERROR", f"패킷 언팩 실패: {e}")
-                return None, False
-            if sof != self.CPP_TO_PY_SOF:
-                self._log("WARNING", f"SOF 불일치: {hex(sof)} (예상: {hex(self.CPP_TO_PY_SOF)})")
-                return None, False
-            calculated_checksum = self.calculate_crc16(data[:-2])
-            if received_checksum != calculated_checksum:
-                self._log("ERROR", f"체크섬 오류: 수신:{received_checksum} 계산:{calculated_checksum}")
-                return None, False
-            state = np.array([
-                current_force,      # 0
-                target_force,       # 1 
-                force_error,        # 2
-                force_error_dot,    # 3
-                force_error_int,    # 4
-                pi_output,          # 5
-            ], dtype=np.float32)
-            sander_active = bool(sander_active)
-            with self.stats_lock:
-                self.packets_received += 1
-            return state, sander_active
-        except Exception as e:
-            self._log("ERROR", f"패킷 처리 오류: {e}")
-            return None, False
-        
-    def calculate_crc16(self, data: bytes) -> int:
-        crc = 0xFFFF
-        for byte in data:
-            crc ^= byte
-            for _ in range(8):
-                if crc & 0x0001:
-                    crc = (crc >> 1) ^ 0xA001
-                else:
-                    crc = crc >> 1
-        return crc
-    
-    def get_latest_state(self):
-        with self.state_lock:
-            if self.latest_state is not None:
-                current_time = time.perf_counter()
-                if (self.last_packet_time and 
-                    current_time - self.last_packet_time > 2.0):
-                    # 오래된 데이터 경고는 한 번만 출력
-                    if not self.old_data_warning_logged:
-                        self._log("WARNING", f"오래된 데이터 감지: {current_time - self.last_packet_time:.2f}초 전")
-                        self.old_data_warning_logged = True
-                else:
-                    # 데이터가 정상이면 경고 플래그 리셋
-                    self.old_data_warning_logged = False
-                    
-                if hasattr(self, 'last_logged_sander_active') and self.last_logged_sander_active != self.latest_sander_active:
-                    self._log("DEBUG", f"RL 플래그 변경: {self.last_logged_sander_active} -> {self.latest_sander_active}")
-                    self.last_logged_sander_active = self.latest_sander_active
-                elif not hasattr(self, 'last_logged_sander_active'):
-                    self.last_logged_sander_active = self.latest_sander_active
-                    self._log("DEBUG", f"초기 RL 플래그: {self.latest_sander_active}")
-                return self.latest_state.copy(), self.latest_sander_active
-        return None, False
-    
-    def send_residual(self, rl_residual, timing_accurate, episode_done, learning_done=False):
-        try:
-            data_part = struct.pack(">HfBBB", 
-                                  self.PY_TO_CPP_SOF, 
-                                  float(rl_residual), 
-                                  bool(timing_accurate), 
-                                  bool(episode_done),
-                                  bool(learning_done))
-            checksum = self.calculate_crc16(data_part)
-            final_packet = struct.pack(self.PY_TO_CPP_PACKET_FORMAT, 
-                                     self.PY_TO_CPP_SOF, 
-                                     float(rl_residual), 
-                                     bool(timing_accurate), 
-                                     bool(episode_done),
-                                     bool(learning_done),
-                                     checksum)
-            self.conn.sendall(final_packet)
-            with self.stats_lock:
-                self.packets_sent += 1
-            return True
-        except Exception as e:
-            self._log("ERROR", f"residual 전송 오류: {e}")
-            return False
-        
-    def send_reset(self):
-        try:
-            reset_data = struct.pack(">HBxxxH", 0xCCCC, 1, 0)
-            checksum = self.calculate_crc16(reset_data[:-2])
-            reset_packet = struct.pack(">HBxxxH", 0xCCCC, 1, checksum)
-            self.conn.sendall(reset_packet)
-            return True
-        except Exception as e:
-            self._log("ERROR", f"리셋 전송 오류: {e}")
-            return False
-        
-    def get_communication_stats(self):
-        uptime = time.perf_counter() - self.connection_start_time if self.connection_start_time else 0
-        with self.stats_lock:
-            packets_received = self.packets_received
-            packets_sent = self.packets_sent
-        return {
-            "uptime_seconds": uptime,
-            "packets_received": packets_received,
-            "packets_sent": packets_sent,
-            "receive_rate_hz": packets_received / uptime if uptime > 0 else 0,
-            "send_rate_hz": packets_sent / uptime if uptime > 0 else 0,
-        }
-    def print_communication_stats(self):
-        stats = self.get_communication_stats()
-        self._log("INFO", "\n📊 === 통신 통계 ===")
-        self._log("INFO", f"⏱️  가동 시간: {stats['uptime_seconds']:.1f}s")
-        self._log("INFO", f"📥 수신된 패킷: {stats['packets_received']}")
-        self._log("INFO", f"📤 송신된 패킷: {stats['packets_sent']}")
-        self._log("INFO", f"📥 수신률: {stats['receive_rate_hz']:.1f} Hz")
-        self._log("INFO", f"📤 송신률: {stats['send_rate_hz']:.1f} Hz")
-        self._log("INFO", "=" * 40)
-
-    def close(self):
-        try:
-            self.is_receiving = False
-            if self.receive_thread and self.receive_thread.is_alive():
-                self.receive_thread.join(timeout=1.0)
-            if self.conn: 
-                self.conn.close()
-            if self.socket: 
-                self.socket.close()
-        finally:
-            self.connected = False
-            self._log("INFO", "통신 종료")
-
-# =========================
-# Environment
-# =========================
-class PneumaticPolishingEnvironment:
-    def __init__(self, cfg=None):
-        if cfg is None:
-            raise ValueError("cfg 파라미터가 필요합니다")
-        self.cfg = cfg
-        self.agent = ResidualSACAgent(cfg)
-        self.comm = ResidualRLCommunicator(cfg["HOST"], cfg["PORT"], cfg["RECV_TIMEOUT_SEC"], cfg["RECV_LOOP_TIMEOUT_SEC"], cfg)
-        self.prev_residual = 0.0
-        self.episode_step = 0
-        self.max_episode_steps = cfg["MAX_EPISODE_STEPS"]
-        self.current_episode_reward = 0.0
-        self.best_episode_reward = -float("inf")
-        self.best_agent_episode = -1
-        self.rl_inactive_count = 0
-        self.max_rl_inactive_steps = 250
-        self.rl_active_in_episode = False
-        self.total_rl_active_steps = 0
-        self.fail_count = 0
-        self.FAIL_MAX = cfg["COMM_FAIL_MAX"]
-        self.last_log_time = None
-        self.previous_target_force = 0.0
-        self.last_valid_state = None
-        self.last_sander_active = False
-        self.update_interval = 1.0 / cfg["UPDATE_FREQ_HZ"]
-        self.last_update_time = None
-        
-        # ==== ADDED: 에피소드 전환 감지용 변수들 ====
-        self.episode_transition_detected = False  # 에피소드 전환 감지 플래그
-        self.waiting_for_episode_start = False    # 새 에피소드 시작 대기 중인지
-        self.episode_end_confirmed = False       # 에피소드 종료 확인됨
-        
-        # --- HER Reward 전용 변수 ---
-        self.band_tol_N = Constants.BAND_TOLERANCE_N
-        self.tau_req_s = Constants.TAU_REQUIRED_SECONDS
-        self.tau_req_steps = int(self.tau_req_s * self.cfg["SEND_FREQ_HZ"])
-        self.band_timer = 0
-        self._last_e = None
-
-        # reward weights (수렴>유지>안정성)
-        self.w_prog = Constants.REWARD_WEIGHT_PROGRESS
-        self.w_band = Constants.REWARD_WEIGHT_BAND
-        self.w_stick = Constants.REWARD_WEIGHT_STICK
-        self.w_edot = Constants.REWARD_WEIGHT_EDOT
-        self.w_du = Constants.REWARD_WEIGHT_DU
-        self.R_success = Constants.SUCCESS_REWARD
-
-        # HER 전용 상태 변수 (원래 보상과 독립적으로 계산)
-        self._last_e_her = None
-        self.prev_residual_her = 0.0  # HER 전용 residual 변수
-
-        # |Δu| 계산 전용 변수 (prev_residual과 분리)
-        self.prev_action_for_du = 0.0          # |Δu| 계산 기준(원래 보상)
-        self.prev_action_for_du_her = 0.0      # |Δu| 계산 기준(HER 보상)
-
-        # ==== ADDED: reward breakdown logger ====
-        self.rlogger = RewardBreakdownLogger(self.cfg["LOG_DIR"])
-        
-        # ==== ADDED: control performance logger ====
-        self.cplogger = ControlPerformanceLogger(self.cfg["LOG_DIR"])
-        
-        # ==== ADDED: learning done logger ====
-        self.ldlogger = LearningDoneLogger(self.cfg["LOG_DIR"])
-        
-    def _log(self, level, message):
-        Logger.log(level, message)
-
-    def generate_episode_reward_graph(self, save_to_rlogger_folder=True):
-        if not hasattr(self, 'agent') or not self.agent.episode_rewards:
-            self._log("WARNING", "생성할 보상 데이터가 없습니다")
-            return
-        try:
-            episode_rewards = self.agent.episode_rewards
-            episodes = list(range(1, len(episode_rewards) + 1))
-            plt.figure(figsize=(12, 6))
-            plt.plot(episodes, episode_rewards, 'b-', linewidth=2, marker='o', markersize=4)
-            plt.xlabel('Episode', fontsize=12)
-            plt.ylabel('Episode Reward', fontsize=12)
-            plt.title('Episode Rewards Over Time', fontsize=14, fontweight='bold')
-            plt.grid(True, alpha=0.3)
-            if len(episode_rewards) > 1:
-                avg_reward = np.mean(episode_rewards)
-                plt.axhline(y=avg_reward, color='r', linestyle='--', alpha=0.7, 
-                           label=f'Average: {avg_reward:.2f}')
-                plt.legend()
-            
-            # RewardBreakdownLogger 폴더에 저장 (기본값)
-            if save_to_rlogger_folder and hasattr(self, 'rlogger'):
-                filename = os.path.join(self.rlogger.log_dir, "episode_rewards.png")
-            else:
-                # 기존 방식 (LOG_DIR에 저장)
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                filename = f"{self.cfg['LOG_DIR']}/episode_rewards_{timestamp}.png"
-                os.makedirs(os.path.dirname(filename), exist_ok=True)
-            
-            plt.tight_layout()
-            plt.savefig(filename, dpi=300, bbox_inches='tight')
-            plt.close()
-            self._log("INFO", f"📈 에피소드별 보상 그래프 저장: {filename}")
-        except Exception as e:
-            self._log("ERROR", f"에피소드별 보상 그래프 생성 오류: {e}")
-    
-    def limit_residual(self, r):
-        # 공압 딜레이 고려하여 즉시 전송 (slew rate 제한 해제)
-        r = float(np.clip(r, self.cfg["R_MIN"], self.cfg["R_MAX"]))
-        # 이전 값 업데이트 (로깅용)
-        self.prev_residual = r
-        return r
-    
-    # ---- HER Reward Methods ----
-    def _update_band_timer(self, state):
-        e = abs(state[0] - state[1])
-        if e <= self.band_tol_N:
-            self.band_timer += 1
-        else:
-            self.band_timer = 0
-
-    def compute_reward_her(self, s, a_residual, s_next, g_force, terminal_success=False, return_components=False):
-        """
-        HER-친화적 보상함수
-        """
-        curF = float(s[0])
-        curF_next = float(s_next[0])
-        e = abs(curF - g_force)
-        e_next = abs(curF_next - g_force)
-
-        edot_abs = abs(float(s[3]))
-        du_abs = abs(a_residual - self.prev_action_for_du)
-
-        if self._last_e is None:
-            prog = 0.0
-        else:
-            prog = (self._last_e - e)
-        self._last_e = e
-
-        R = 0.0
-        R += self.w_prog * prog
-        in_band_now = 1.0 if e <= self.band_tol_N else 0.0
-        in_band_next = 1.0 if e_next <= self.band_tol_N else 0.0
-        R += self.w_band * in_band_now
-        R += self.w_stick * (in_band_now * in_band_next)
-        R -= self.w_edot * edot_abs
-        R -= self.w_du * du_abs
-        if terminal_success:
-            R += self.R_success
-
-        R = float(np.clip(R, Constants.REWARD_MIN, Constants.REWARD_MAX))
-
-        if return_components:
-            return R, {
-                "prog": float(prog),
-                "in_band_now": float(in_band_now),
-                "edot_abs": float(edot_abs),
-                "du_abs": float(du_abs)
-            }
-        return R
-
-    def compute_reward_her_independent(self, s, a_residual, s_next, g_force, terminal_success=False, return_components=False):
-        """
-        HER 전용 독립적 보상함수 (원래 보상과 상태 공유하지 않음)
-        """
-        curF = float(s[0])
-        curF_next = float(s_next[0])
-        e = abs(curF - g_force)
-        e_next = abs(curF_next - g_force)
-
-        edot_abs = abs(float(s[3]))
-        du_abs = abs(a_residual - self.prev_action_for_du_her)
-
-        # HER 전용 진행도 계산 (독립적)
-        if self._last_e_her is None:
-            prog = 0.0
-        else:
-            prog = (self._last_e_her - e)
-        self._last_e_her = e
-
-        R = 0.0
-        R += self.w_prog * prog
-        in_band_now = 1.0 if e <= self.band_tol_N else 0.0
-        in_band_next = 1.0 if e_next <= self.band_tol_N else 0.0
-        R += self.w_band * in_band_now
-        R += self.w_stick * (in_band_now * in_band_next)
-        R -= self.w_edot * edot_abs
-        R -= self.w_du * du_abs
-        if terminal_success:
-            R += self.R_success
-
-        R = float(np.clip(R, Constants.REWARD_MIN, Constants.REWARD_MAX))
-
-        if return_components:
-            return R, {
-                "prog": float(prog),
-                "in_band_now": float(in_band_now),
-                "edot_abs": float(edot_abs),
-                "du_abs": float(du_abs)
-            }
-        return R
-
-    def is_done(self, state):
-        if self.episode_step >= self.max_episode_steps:
-            return True, False
-        if state[0] > 100.0:
-            self._log("WARNING", f"안전: 힘 과다 {state[0]:.1f}N > 100N")
-            return True, False
-        self._update_band_timer(state)
-        if self.band_timer >= self.tau_req_steps:
-            self._log("SUCCESS", Constants.BAND_SUCCESS_MESSAGE.format(self.band_tol_N, self.tau_req_s))
-            return True, True
-        return False, False
-
-    # ---- 학습 주기 제어 ----
-    def should_update_now(self):
-        now = time.perf_counter()
-        if self.last_update_time is None:
-            self.last_update_time = now
-            return True
-        if now - self.last_update_time >= self.update_interval:
-            self.last_update_time = now
-            return True
-        return False
-    
-    # ---- RL activity monitor ----
-    def check_rl_status(self, sander_active):
-        if sander_active:
-            self.rl_inactive_count = 0
-            self.rl_active_in_episode = True
-            self.total_rl_active_steps += 1
-            
-            # ==== ADDED: 에피소드 시작 감지 (0→1 전환) ====
-            if self.waiting_for_episode_start and not self.last_sander_active:
-                self._log("INFO", "🎬 새 에피소드 시작 감지! (sander_active: 0→1)")
-                self.waiting_for_episode_start = False
-                self.episode_transition_detected = True
-                self.episode_end_confirmed = False
-            
-            return "active"
-        else:
-            self.rl_inactive_count += 1
-            
-            # ==== ADDED: 에피소드 종료 감지 (1→0 전환) ====
-            if self.last_sander_active and not sander_active:
-                self._log("INFO", "🏁 에피소드 종료 감지! (sander_active: 1→0)")
-                self.episode_end_confirmed = True
-                self.waiting_for_episode_start = True
-                return "episode_end"
-            
-            if self.rl_inactive_count >= self.max_rl_inactive_steps:
-                self._log("WARNING", "RL 비활성 너무 오래 → 에피소드 종료")
-                return "terminate"
-            return "inactive"
-
-    def end_episode_fast_with_reliable_flag(self, ep, target_force):
-        self._log("INFO", f"🎯 에피소드 {ep+1} 완료 (단계 {self.episode_step})")
-        success = self.comm.send_residual(0.0, True, True, False)  # episode_done=True, learning_done=False
-        if success:
-            self._log("INFO", f"📡 Episode done 신호 전송 성공")
-        else:
-            self._log("WARNING", f"⚠️ Episode done 신호 전송 실패")
-        confirmation_start = time.perf_counter()
-        max_confirmation_time = 0.5
-        while (time.perf_counter() - confirmation_start) < max_confirmation_time:
-            state, _ = self.comm.get_latest_state()
-            if state is not None and abs(state[1] - target_force) > 1.0:
-                elapsed = time.perf_counter() - confirmation_start
-                self._log("INFO", f"✅ 에피소드 종료 확인! {target_force:.1f}N → {state[1]:.1f}N ({elapsed:.3f}s 소요)")
-                break
-            time.sleep(self.cfg["RECV_INTERVAL_SEC"])
-        else:
-            self._log("INFO", f"⚡ Episode done 신호 전송 후 에피소드 종료 (500ms 타임아웃) - 다음 에피소드로 진행")
-        success = self.comm.send_residual(0.0, True, False, False)  # episode_done=False, learning_done=False
-        return True
-
-    def reset_episode(self):
-        self.prev_residual = 0.0
-        self.episode_step = 0
-        self.current_episode_reward = 0.0
-        self.rl_inactive_count = 0
-        self.rl_active_in_episode = False
-        self.last_log_time = None
-        self.last_valid_state = None
-        self.last_sander_active = False
-        self.last_update_time = None
-        self.band_timer = 0
-        self._last_e = None
-        self._last_e_her = None
-        self.prev_residual_her = 0.0
-        # |Δu| 계산 전용 변수 초기화
-        self.prev_action_for_du = 0.0
-        self.prev_action_for_du_her = 0.0
-        
-        # ==== ADDED: 에피소드 전환 관련 변수 초기화 ====
-        self.episode_transition_detected = False
-        self.waiting_for_episode_start = False
-        self.episode_end_confirmed = False
-        state, _ = self.comm.get_latest_state()
-        if state is not None:
-            self.previous_target_force = state[1]
-            self._log("INFO", f"에피소드 목표 힘: {self.previous_target_force:.1f}N")
-        ok = self.comm.send_reset()
-        if ok:
-            self._log("INFO", "\n--- 에피소드 리셋 ---")
-            self._log("INFO", "로봇PC: 1kHz PI 실행 중, 각 틱마다 RL residual(보유) 추가.")
-        else:
-            self._log("WARNING", "리셋 신호 실패 (계속 진행).")
-        return ok
-
-    # ---- main loop ----
-    def run_training(self, episodes=None):
-        episodes = episodes or self.cfg["EPISODES"]
-        if not self.comm.connect():
-            self._log("ERROR", "로봇PC 연결 실패")
-            return
-        model_save_dir = self.cfg["MODEL_SAVE_DIR"]
-        os.makedirs(model_save_dir, exist_ok=True)
-        self._log("INFO", f"📁 모델 저장 디렉토리: {model_save_dir}")
-        self._log("INFO", "🚀 최적화된 Residual RL 학습 시작 - 버전 8")
-        self._log("INFO", f"📡 송신: {self.cfg['SEND_FREQ_HZ']}Hz residual 출력 ({self.cfg['TICK_SEC']:.3f}초 간격)")
-        self._log("INFO", f"📥 수신: {self.cfg['RECV_FREQ_HZ']}Hz 상태 수신 ({self.cfg['RECV_INTERVAL_SEC']:.3f}초 간격)")
-        self._log("INFO", f"⚡ 최적화: {self.cfg['SEND_FREQ_HZ']}Hz 안정적 송신을 위한 빠른 에피소드 전환")
-        self._log("INFO", f"⏱️  에피소드: {self.cfg['MAX_EPISODE_STEPS']} 단계 ({self.cfg['SEND_FREQ_HZ']}Hz에서 {self.cfg['MAX_EPISODE_STEPS'] * self.cfg['TICK_SEC']:.1f}초)")
-        self._log("INFO", "\n🔄 RL 활성화 대기 중...")
-        wait_start_time = time.perf_counter()
-        while True:
-            state, sander_active = self.comm.get_latest_state()
-            if sander_active:
-                wait_duration = time.perf_counter() - wait_start_time
-                self._log("INFO", f"🎯 RL 활성화! ({wait_duration:.1f}s 대기)")
-                # 대기 메시지 플래그 리셋 (다음 대기 시 다시 출력 가능하도록)
-                if hasattr(self, '_waiting_message_shown'):
-                    delattr(self, '_waiting_message_shown')
-                break
-            if state is not None:
-                current_force = state[0]
-                target_force = state[1]
-                # 대기 메시지를 한 번만 출력하도록 수정
-                if not hasattr(self, '_waiting_message_shown'):
-                    Logger.log("INFO", f"⏳ Waiting... Current Force: {current_force:.1f}N, Target: {target_force:.1f}N")
-                    self._waiting_message_shown = True
-            time.sleep(Constants.WAIT_MESSAGE_INTERVAL)
-            if time.perf_counter() - wait_start_time > 300:
-                self._log("WARNING", "\n⚠️ RL 활성화 타임아웃 (5분)")
-                return
-        episode_stats = []
-        for ep in range(episodes):
-            self._log("INFO", f"\n🎬 === 에피소드 {ep+1}/{episodes} 시작 ===")
-            
-            # ==== ADDED: 새 에피소드 시작 대기 (sander_active=1 감지) ====
-            if ep > 0:  # 첫 번째 에피소드가 아닌 경우에만 대기
-                self._log("INFO", "🔄 로봇 리셋 완료 후 새 에피소드 시작 대기 중... (sander_active=1)")
-                wait_start = time.perf_counter()
-                waiting_message_shown = False  # 대기 메시지 표시 플래그
-                while not self.episode_transition_detected:
-                    state, sander_active = self.comm.get_latest_state()
-                    
-                    # ==== ADDED: 대기 중 상태를 1번만 표시 ====
-                    if state is not None and not waiting_message_shown and not sander_active:
-                        current_force = state[0]
-                        target_force = state[1]
-                        self._log("INFO", f"⏳ 로봇 z축 이동 중... sander_active=0 대기 중 (Current Force: {current_force:.1f}N, Target: {target_force:.1f}N)")
-                        waiting_message_shown = True
-                    
-                    if sander_active and self.waiting_for_episode_start:
-                        wait_duration = time.perf_counter() - wait_start
-                        self._log("INFO", f"🎬 새 에피소드 시작 감지! (sander_active: 0→1) - {wait_duration:.1f}초 대기")
-                        self.waiting_for_episode_start = False
-                        self.episode_transition_detected = True
-                        self.episode_end_confirmed = False
-                        break
-                    
-                    time.sleep(0.1)
-            
-            episode_start_state, episode_start_sander_active = self.comm.get_latest_state()
-            if not episode_start_sander_active:
-                self._log("WARNING", f"⚠️ 경고: 에피소드 {ep+1} 시작 시 RL 플래그 False")
-                self._log("INFO", "🔄 RL 활성화 대기 중...")
-                wait_start = time.perf_counter()
-                while not episode_start_sander_active:
-                    episode_start_state, episode_start_sander_active = self.comm.get_latest_state()
-                    if time.perf_counter() - wait_start > 60:
-                        self._log("WARNING", f"⚠️ 에피소드 {ep+1}에서 RL 활성화 대기 타임아웃")
-                        break
-                    time.sleep(0.1)
-            episode_start_time = time.perf_counter()
-            self.reset_episode()
-            self._log("INFO", f"📡 에피소드 {ep+1} 시작")
-            self.comm.send_residual(0.0, True, False, False)  # episode_done=False, learning_done=False
-            prev_state = None
-            prev_action = None
-            prev_sander_active = False
-            episode_packets_received = 0
-            episode_packets_sent = 0
-            episode_rl_active_steps = 0
-            episode_start_perf_time = time.perf_counter()
-            tick_count = 0
-            
-            while True:
-                current_time = time.perf_counter()
-                next_send_time = episode_start_perf_time + (tick_count + 1) * self.cfg["TICK_SEC"]
-                if current_time >= next_send_time:
-                    tick_count += 1
-                    timing_accurate = abs(current_time - next_send_time) <= self.cfg["TICK_TOL"]
-                    res = self.comm.get_latest_state()
-                    if res[0] is None:
-                        if self.last_valid_state is not None:
-                            state = self.last_valid_state.copy()
-                            sander_active = self.last_sander_active
-                            self._log("DEBUG", f"데이터 없음 - 이전 상태 사용 (step {self.episode_step})")
-                        else:
-                            state = np.array([0.0, Constants.DEFAULT_FORCE_VALUE, Constants.DEFAULT_FORCE_VALUE, 0.0, 0.0, 0.0], dtype=np.float32)
-                            sander_active = False
-                            self._log("DEBUG", f"데이터 없음 - 기본값 사용 (step {self.episode_step})")
-                        
-                    else:
-                        state, sander_active = res
-                        self.last_valid_state = state.copy()
-                        
-                        self.last_sander_active = sander_active
-                        episode_packets_received += 1
-                        self.previous_target_force = state[1]
-                else:
-                    time.sleep(0.001)
-                    continue
-
-                self.episode_step += 1
-                done, success = self.is_done(state)
-                
-                # ==== ADDED: 실시간 제어 지표 데이터 수집 ====
-                if state is not None:
-                    current_time = time.perf_counter() - episode_start_time
-                    self.cplogger.add_data_point(
-                        time=current_time,
-                        force=state[0],
-                        target=state[1],
-                        control_effort=abs(rl_residual) if 'rl_residual' in locals() else 0.0,
-                        pi_output=state[5]
-                    )
-                
-                # ==== CHANGED: 보상 계산 + 로깅 + HER 저장 ====
-                if prev_state is not None and prev_sander_active:
-                    # (A) 원래 목표로 보상/저장
-                    reward, comp = self.compute_reward_her(
-                        prev_state, prev_action, state, prev_state[1],
-                        terminal_success=success, return_components=True
-                    )
-                    self.agent.store_transition(prev_state, prev_action, reward, state, done)
-                    self.current_episode_reward += reward
-
-                    # 스텝 로깅 (HER 아님)
-                    self.rlogger.log_step(
-                        episode=ep+1,
-                        step=self.episode_step,
-                        prog=comp["prog"],
-                        in_band_now=comp["in_band_now"],
-                        edot_abs=comp["edot_abs"],
-                        du_abs=comp["du_abs"],
-                        reward=reward,
-                        is_her=0
-                    )
-
-                    # HER: 실패한 경우에만 relabel transition 추가
-                    if abs(prev_state[0] - prev_state[1]) > self.band_tol_N:
-                        # 1. Config에서 HER 샘플 개수 가져오기
-                        num_her_samples = self.cfg["HER_SAMPLES"]
-                        
-                        # 2. Trajectory 기반 future sampling (정석적 HER)
-                        # 현재 달성된 힘을 기준으로 다양한 미래 목표 생성
-                        current_force = state[0]
-                        target_force = prev_state[1]
-                        
-                        # 3. 다양한 alternative goal 생성
-                        future_goals = []
-                        for i in range(num_her_samples):
-                            if i == 0:
-                                # 현재 달성된 힘
-                                future_goals.append(current_force)
-                            elif i == 1:
-                                # 원래 목표와 현재 힘의 중간값
-                                future_goals.append((current_force + target_force) / 2)
-                            elif i == 2:
-                                # 원래 목표 방향으로 약간 이동
-                                direction = 1 if target_force > current_force else -1
-                                future_goals.append(current_force + direction * np.random.uniform(0.5, 2.0))
-                            else:
-                                # 랜덤 노이즈 추가
-                                future_goals.append(current_force + np.random.normal(0, 1.0))
-                        
-                        # 4. 각 alternative goal에 대해 HER transition 생성
-                        for i in range(num_her_samples):
-                            achieved_goal = future_goals[i]
-                            
-                            # HER 전용 독립적 보상함수 사용
-                            her_reward, her_comp = self.compute_reward_her_independent(
-                                prev_state, prev_action, state, achieved_goal, 
-                                terminal_success=False, return_components=True
-                            )
-                            self.agent.store_transition(prev_state, prev_action, her_reward, state, done)
-                            
-                            # HER residual 업데이트는 루프 외부에서 수행
-
-                            # 5. 스텝 로깅 (HER) - 첫 번째 샘플만 로깅
-                            if i == 0:
-                                self.rlogger.log_step(
-                                    episode=ep+1,
-                                    step=self.episode_step,
-                                    prog=her_comp["prog"],
-                                    in_band_now=her_comp["in_band_now"],
-                                    edot_abs=her_comp["edot_abs"],
-                                    du_abs=her_comp["du_abs"],
-                                    reward=her_reward,
-                                    is_her=1
-                                )
-                
-                # HER 루프 완료 후 |Δu| 계산용 변수 업데이트
-                if prev_action is not None:
-                    self.prev_action_for_du = prev_action
-                    self.prev_action_for_du_her = prev_action
-                
-                if (len(self.agent.replay) > self.cfg["REPLAY_WARMUP"] and 
-                    self.should_update_now()):
-                    self.agent.update_parameters(self.cfg["BATCH_SIZE"])
-                
-                rl_status = self.check_rl_status(sander_active)
-                if rl_status == "terminate":
-                    self._log("INFO", "RL 비활성 지속으로 에피소드 종료")
-                    break
-                elif rl_status == "episode_end":
-                    self._log("INFO", "🏁 sander_active=0으로 에피소드 종료 감지 - 로봇 리셋 대기 중...")
-                    # 에피소드 종료 처리
-                    episode_done = True
-                    rl_residual = 0.0
-                    break
-                
-                if done or self.episode_step >= self.max_episode_steps:
-                    episode_done = True
-                    rl_residual = 0.0
-                    if done:
-                        if success:
-                            self._log("INFO", f"🎯 에피소드 {ep+1} 성공 종료 (밴드 유지 성공, 단계 {self.episode_step}) - episode_done=True 전송")
-                        else:
-                            self._log("INFO", f"🎯 에피소드 {ep+1} 종료 (조건 만족, 단계 {self.episode_step}) - episode_done=True 전송")
-                    else:
-                        self._log("INFO", f"🎯 에피소드 {ep+1} 종료 (최대 스텝 도달, 단계 {self.episode_step}) - episode_done=True 전송")
-                else:
-                    episode_done = False
-                    if sander_active:
-                        raw_res = self.agent.select_action(state, evaluate=False)
-                        rl_residual = self.limit_residual(raw_res)
-                        episode_rl_active_steps += 1
-                    else:
-                        rl_residual = 0.0
-                
-                if not episode_done:
-                    retry_count = 0
-                    max_retries = 2
-                    ok = False
-                    while retry_count <= max_retries and not ok:
-                        ok = self.comm.send_residual(rl_residual, timing_accurate, episode_done, False)  # learning_done=False
-                        if not ok:
-                            retry_count += 1
-                            if retry_count <= max_retries:
-                                self._log("DEBUG", f"송신 재시도 {retry_count}/{max_retries}")
-                                time.sleep(self.cfg["COMM_RETRY_DELAY"])
-                    if not ok:
-                        self.fail_count += 1
-                        self._log("WARNING", f"⚠️ 송신 실패 ({self.fail_count}/{self.FAIL_MAX})")
-                        if self.fail_count >= self.FAIL_MAX:
-                            self.comm.send_residual(0.0, False, True, False)  # episode_done=True, learning_done=False
-                            self._log("WARNING", "통신 상태 악화 → 로봇PC에 PI 전용 대체 권고; 에피소드 종료.")
-                            break
-                    else:
-                        self.fail_count = 0
-                        episode_packets_sent += 1
-
-                if episode_done:
-                    success_flag = self.end_episode_fast_with_reliable_flag(ep, self.previous_target_force)
-                    if success_flag:
-                        break
-
-                if (self.last_log_time is None or 
-                    current_time - self.last_log_time >= 5.0):
-                    mode = "RESIDUAL" if sander_active else "PI-ONLY"
-                    force_achieved = " 🎯 TARGET ACHIEVED!" if abs(state[0] - state[1]) < 0.5 else ""
-                    timing_status = "EXACT" if timing_accurate else "LATE"
-                    self._log("INFO", f"[에피 {ep+1}] 단계 {self.episode_step} | {mode} | "
-                          f"F {state[0]:.1f}/{state[1]:.1f}N | "
-                          f"PI {state[5]:.3f}MPa | RL {rl_residual:.3f}MPa | {timing_status} | "
-                          f"Time: {current_time - episode_start_time:.1f}s | "
-                          f"RL_Flag: {sander_active}{force_achieved}")
-                    self.last_log_time = current_time
-
-                prev_state = state.copy()
-                prev_action = rl_residual
-                prev_sander_active = sander_active
-
-            # ---- episode end ----
-            episode_duration = time.perf_counter() - episode_start_time
-            episode_stat = {
-                "episode": ep + 1,
-                "duration": episode_duration,
-                "steps": self.episode_step,
-                "reward": self.current_episode_reward,
-                "packets_received": episode_packets_received,
-                "packets_sent": episode_packets_sent,
-                "rl_active_steps": episode_rl_active_steps,
-                "rl_active_ratio": episode_rl_active_steps / self.episode_step if self.episode_step > 0 else 0
-            }
-            episode_stats.append(episode_stat)
-            self.agent.episode_rewards.append(self.current_episode_reward)
-            
-            # ==== ADDED: 에피소드별 제어 지표 저장 ====
-            self.cplogger.save_episode_metrics(ep + 1)
-            self.cplogger.reset_episode_data()  # 다음 에피소드를 위해 데이터 초기화
-            
-            # ==== ADDED: 에피소드 종료 후 로봇 리셋 대기 ====
-            # 모든 에피소드 완료 시 다음 에피소드 시작 대기 플래그 설정
-            self._log("INFO", "🔄 로봇이 z축으로 이동하여 공압 툴 환경을 리셋하는 중...")
-            self._log("INFO", "⏳ 다음 에피소드 시작을 위해 sander_active=1 대기 중...")
-            # 다음 에피소드에서 sander_active=1을 감지할 수 있도록 플래그 설정
-            self.waiting_for_episode_start = True
-            
-            if len(self.agent.episode_rewards) > self.agent.max_rewards_history:
-                self.agent.episode_rewards = self.agent.episode_rewards[-self.agent.max_rewards_history:]
-                self._log("DEBUG", f"보상 기록 정리: {self.agent.max_rewards_history}개로 제한")
-            if self.current_episode_reward > self.best_episode_reward:
-                self.best_episode_reward = self.current_episode_reward
-                self.best_agent_episode = ep
-                self.agent.save_model(f"{self.cfg['MODEL_SAVE_DIR']}/test_best_agent_episode_{ep+1}_reward_{self.best_episode_reward:.2f}.pth")
-
-            if (ep + 1) % 10 == 0:
-                self._log("INFO", f"\n🎯 === 에피소드 {ep+1}/10 완료 ===")
-                self._log("INFO", f"⏱️  지속 시간: {episode_duration:.1f}s")
-                self._log("INFO", f"📊 단계: {self.episode_step:,}/{self.max_episode_steps:,} ({self.episode_step/self.max_episode_steps*100:.1f}%)")
-                self._log("INFO", f"🏆 보상: {self.current_episode_reward:.2f}")
-                self._log("INFO", f"📥 수신 패킷: {episode_packets_received}")
-                self._log("INFO", f"📤 송신 패킷: {episode_packets_sent}")
-                self._log("INFO", f"🤖 RL 활성 단계: {episode_rl_active_steps} ({episode_stat['rl_active_ratio']*100:.1f}%)")
-                self._log("INFO", f"📈 지금까지 최고: {self.best_episode_reward:.2f}")
-                if self.episode_step >= self.max_episode_steps:
-                    self._log("INFO", f"✅ 완료: 최대 에피소드 단계 도달 ({self.max_episode_steps:,})")
-                else:
-                    self._log("WARNING", "⚠️  완료: 에피소드 조기 종료 (안전 또는 오류)")
-                self._log("INFO", "=" * 40)
-            else:
-                self._log("INFO", f"🎯 에피소드 {ep+1} 완료 - 보상: {self.current_episode_reward:.2f}, 최고: {self.best_episode_reward:.2f}")
-
-            if (ep + 1) % 10 == 0:
-                self.comm.print_communication_stats()
-
-            # ==== REMOVED: 50 에피소드마다 자동 저장 제거 ====
-            # self.rlogger.flush_if_needed(ep + 1)  # Ctrl+C나 완료 시에만 저장
-
-        # ==== ADDED: 모든 데이터 최종 저장 ====
-        DataSaver.save_all_data(self, episodes, force=True)
-        
-
-        self._log("INFO", "\n🎯 최적화된 학습 완료!")
-        self._log("INFO", f"✅ {episodes}개 에피소드 성공적으로 완료")
-        self._log("INFO", f"🏆 최고 에피소드: {self.best_agent_episode+1}, 최고 보상: {self.best_episode_reward:.2f}")
-        
-        # ==== ADDED: 강화학습 완료 신호 전송 ====
-        self._log("INFO", "📡 강화학습 완료 신호 전송 중...")
-        success = self.comm.send_residual(0.0, True, False, True)  # learning_done=True
-        if success:
-            self._log("INFO", "✅ 강화학습 완료 신호 전송 성공")
-        else:
-            self._log("WARNING", "⚠️ 강화학습 완료 신호 전송 실패")
-        
-        self._log("INFO", "\n📊 === 최종 학습 요약 ===")
-        total_duration = sum(ep["duration"] for ep in episode_stats)
-        avg_reward = np.mean([ep["reward"] for ep in episode_stats])
-        self._log("INFO", f"⏱️ 총 지속 시간: {total_duration:.1f}s")
-        self._log("INFO", f"📊 평균 보상: {avg_reward:.2f}")
-        self._log("INFO", f"📈 최고 보상: {self.best_episode_reward:.2f}")
-        self._log("INFO", f"🤖 총 RL 활성 단계: {self.total_rl_active_steps}")
-        self.comm.print_communication_stats()
-        self.comm.close()
-
-# =========================
-# Signal Handler for Safe Exit
-# =========================
-def signal_handler(signum, frame):
-    print(f"\n⚠️ Received signal {signum}. Shutting down gracefully...")
-    if 'env' in globals():
-        try:
-            # ==== ADDED: 강제 종료 시 learning_done=True 전송 ====
-            print("📡 강화학습 강제 종료 신호 전송 중...")
-            try:
-                success = env.comm.send_residual(0.0, True, False, True)  # learning_done=True
-                if success:
-                    print("✅ 강화학습 강제 종료 신호 전송 성공")
-                else:
-                    print("⚠️ 강화학습 강제 종료 신호 전송 실패")
-            except Exception as e:
-                print(f"⚠️ 강화학습 강제 종료 신호 전송 오류: {e}")
-            
-            print("📈 데이터 저장 중...")
-            # ==== ADDED: 강제 종료 시에도 지금까지 쌓인 로우를 저장/그림 ====
-            try:
-                # 현재까지 완료된 에피소드 수로 flush (강제 실행)
-                current_episode = len(env.agent.episode_rewards)
-                env.rlogger.flush_if_needed(current_episode, force=True, episode_rewards=env.agent.episode_rewards)
-            except Exception as e:
-                Logger.log("ERROR", f"reward breakdown flush 실패: {e}")
-            
-            # ==== ADDED: 제어 성능 지표 저장 ====
-            try:
-                print("📊 제어 성능 지표 저장 중...")
-                env.cplogger.save_performance_summary()
-                env.cplogger.generate_plots()
-                print("✅ 제어 성능 지표 저장 완료!")
-            except Exception as e:
-                print(f"⚠️ 제어 성능 지표 저장 실패: {e}")
-            
-            # ==== ADDED: Learning Done 폴더에 파일들 복사 ====
-            try:
-                print("📁 Learning Done 폴더에 파일들 복사 중...")
-                env.ldlogger.copy_episode_rewards(env.agent.episode_rewards, env.rlogger.log_dir)
-                env.ldlogger.copy_reward_breakdown(env.rlogger.log_dir)
-                print("✅ Learning Done 폴더 복사 완료!")
-            except Exception as e:
-                print(f"⚠️ Learning Done 폴더 복사 실패: {e}")
-            
-            
-            Logger.log("INFO", "✅ 데이터 저장 완료!")
-        except Exception as e:
-            Logger.log("ERROR", f"❌ 데이터 저장 실패: {e}")
-    sys.exit(0)
-
-# =========================
-# Main
+# MAIN EXECUTION
 # =========================
 if __name__ == "__main__":
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
-    SEND_FREQUENCY_HZ = 100
     RECV_FREQUENCY_HZ = 1000
-    config = create_config(SEND_FREQUENCY_HZ, RECV_FREQUENCY_HZ)
-    print("🚀 TEST VERSION 9: JY_Pneumatic_SAC_Pre_only_test_9_main.py")
-    print(f"⚡ 송신 주파수: {SEND_FREQUENCY_HZ}Hz (간격: {config['TICK_SEC']:.3f}초)")
+    config = create_config(RECV_FREQUENCY_HZ)
+    print("🚀 PID GAIN OPTIMIZATION VERSION: JY_PID_Gain_SAC_1_test.py")
     print(f"📡 수신 주파수: {RECV_FREQUENCY_HZ}Hz (간격: {config['RECV_INTERVAL_SEC']:.3f}초)")
+    print(f"🎯 목표 힘: {config['TARGET_FORCE']}N 고정")
+    print(f"⏱️ 에피소드 길이: {config['EPISODE_SECONDS']}초")
     print("=" * 60)
-    np.random.seed(42) 
+    
+    # 재현성을 위한 시드 설정
+    np.random.seed(42)
     torch.manual_seed(42)
-    random.seed(42)
-    env = PneumaticPolishingEnvironment(config)
+    torch.cuda.manual_seed_all(42)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    print("🎲 재현성 시드 설정 완료 (42)")
+    env = PIDGainOptimizationEnvironment(config)
     try:
-        print(f"🚀 Starting optimized training for {SEND_FREQUENCY_HZ}Hz stable performance...")
-        env.run_training(config["EPISODES"])
+        print(f"🚀 Starting PID Gain optimization training...")
+        env.run_pid_optimization_training(config["EPISODES"])
         print("✅ Training completed successfully!")
         try:
             print("📈 데이터 저장 중...")
@@ -1915,7 +2682,7 @@ if __name__ == "__main__":
         # ==== ADDED: KeyboardInterrupt 시 learning_done=True 전송 ====
         try:
             print("📡 강화학습 중단 신호 전송 중...")
-            success = env.comm.send_residual(0.0, True, False, True)  # learning_done=True
+            success = env.comm.send_pid_once(0.0, 0.0, 0.0, True, False, True)  # learning_done=True
             if success:
                 print("✅ 강화학습 중단 신호 전송 성공")
             else:
@@ -1932,7 +2699,7 @@ if __name__ == "__main__":
         # ==== ADDED: 예외 발생 시 learning_done=True 전송 ====
         try:
             print("📡 강화학습 오류 종료 신호 전송 중...")
-            success = env.comm.send_residual(0.0, True, False, True)  # learning_done=True
+            success = env.comm.send_pid_once(0.0, 0.0, 0.0, True, False, True)  # learning_done=True
             if success:
                 print("✅ 강화학습 오류 종료 신호 전송 성공")
             else:
