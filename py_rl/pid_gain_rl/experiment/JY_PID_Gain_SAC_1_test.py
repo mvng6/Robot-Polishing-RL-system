@@ -93,7 +93,7 @@ class Constants:
     # =========================
     DEFAULT_BATCH_SIZE = 128          # 배치 크기 - 한 번에 학습할 경험 개수
     # 워밍업 에피소드 제거 - 첫 에피소드에서 기준값 사용 후 바로 강화학습 시작
-    DEFAULT_EPISODES = 250            # 총 에피소드 수 - 전체 학습 횟수
+    DEFAULT_EPISODES = 500            # 총 에피소드 수 - 전체 학습 횟수 (250→500 증가)
     DEFAULT_EPISODE_SECONDS = 15.0    # 에피소드 길이 (초) - PID gain 최적화용
     DEFAULT_TARGET_FORCE = 45.0       # 목표 힘 (N) - 고정값
     DEFAULT_UPDATES_PER_EPISODE = 16 # 에피소드당 업데이트 횟수 (과적합 방지)
@@ -112,7 +112,7 @@ class Constants:
     # 메모리 관련 상수
     # =========================
     DEFAULT_MAX_REWARDS_HISTORY = 1000        # 최대 보상 기록 수 - 메모리 절약을 위한 제한
-    DEFAULT_REPLAY_BUFFER_SIZE = 2000         # 리플레이 버퍼 크기 - PID 최적화용 (에피소드당 1개 transition, 250개 에피소드 × 8배)
+    DEFAULT_REPLAY_BUFFER_SIZE = 4000         # 리플레이 버퍼 크기 - PID 최적화용 (에피소드당 1개 transition, 500개 에피소드 × 8배)
     
     # =========================
     # 경로 관련 상수
@@ -127,21 +127,34 @@ class Constants:
     DEFAULT_FORCE_VALUE = -30.0       # 기본 힘 값 (N) - 데이터 없을 때 사용
     
     # =========================
-    # PID 최적화 보상 관련 상수
+    # PID 최적화 보상 관련 상수 (점진적 보상 설계)
     # =========================
-    # PID 최적화 보상 가중치 (정규화된 지표 기반)
-    REWARD_WEIGHT_BAND = 1.5          # 밴드 유지 비율 가중치 (핵심 지표)
-    REWARD_WEIGHT_RMSE = 1.2          # RMSE 가중치 - 제어 정확도
-    REWARD_WEIGHT_OVERSHOOT = 0.7     # 오버슈트 가중치 - 과도한 응답 방지
-    REWARD_WEIGHT_SETTLING = 0.6      # 정착시간 가중치 - 빠른 수렴
-    REWARD_WEIGHT_VARIANCE = 0.4      # 오차 분산 가중치 - 진동성/안정성
-    REWARD_WEIGHT_U_RMS = 0.3         # 제어 노력 가중치 - PI 출력 RMS
-    REWARD_WEIGHT_DU_RMS = 0.3        # 제어 변화율 가중치 - PI 출력 변화율
-    REWARD_WEIGHT_SATURATION = 0.4    # 포화 비율 가중치 - 제어 포화 방지
+    # 품질 점수 가중치 (합=1.0으로 정규화, 높을수록 중요)
+    QUALITY_WEIGHTS = {
+        'band': 0.30,      # 밴드 유지 비율 (가장 중요)
+        'rmse': 0.20,      # RMSE - 제어 정확도
+        'os': 0.12,        # 오버슈트 - 과도 응답 방지
+        'set': 0.12,       # 정착시간 - 빠른 수렴
+        'var': 0.08,       # 오차 분산 - 진동성/안정성
+        'u': 0.06,         # 제어 노력 - PI 출력 RMS
+        'du': 0.06,        # 제어 변화율 - PI 출력 부드러움
+        'sat': 0.06        # 포화 방지 - 제어 포화 최소화
+    }
     
-    # 보상 범위
-    REWARD_MIN = -100.0               # 최소 보상값 (안전 위반 시)
-    REWARD_MAX = 50.0                 # 최대 보상값 (완벽한 제어 시)
+    # 점진적 보상 파라미터
+    REWARD_BASE_SCALE = 20.0          # 기본 보상 스케일 (0~20 범위)
+    REWARD_NONLINEAR_EXP = 1.5        # 비선형 지수 (목표 근처 가속, 1.0=선형, 2.0=제곱)
+    REWARD_BALANCE_SCALE = 5.0        # 균형 보너스 스케일 (0~5 범위)
+    REWARD_BALANCE_EXP = 2.0          # 균형 보너스 지수 (병목 효과 강도)
+    
+    # 안전 페널티 파라미터 (연속적 sigmoid)
+    SAFETY_PENALTY_MAX = -50.0        # 최대 안전 페널티
+    SAFETY_PENALTY_SHARPNESS = 0.8    # Sigmoid 경사도 (0.5~1.5, 높을수록 급격)
+    SAFETY_PENALTY_MARGIN = 5.0       # 부드러운 전환 구간 (N)
+    
+    # 보상 범위 (참고용)
+    REWARD_MIN = -50.0                # 최소 보상값 (안전 위반 최악)
+    REWARD_MAX = 25.0                 # 최대 보상값 (완벽 제어, 20+5)
     
     # 제어 성능 임계값
     BAND_TOLERANCE_N = 0.5            # 밴드 허용 오차 (N) - 논문 스펙: ±0.5N
@@ -1003,7 +1016,7 @@ class PIDGainOptimizationEnvironment:
     
     def calculate_episode_reward(self, force_data, pi_output_data, target_force=45.0, episode_len_s=15.0):
         """
-        개선된 에피소드 총보상 계산 (정규화 및 주파수 독립적)
+        점진적 보상 설계 (Shaped Reward) - 목표에 가까워질수록 더 큰 보상
         Args:
             force_data: 에피소드 동안의 힘 데이터 리스트
             pi_output_data: 에피소드 동안의 PI 출력 데이터 리스트
@@ -1027,7 +1040,7 @@ class PIDGainOptimizationEnvironment:
         dt = 1.0 / fs_hz
         
         # ========================================
-        # 1. 핵심 성능 지표 (정규화)
+        # 1. 핵심 성능 지표 계산 (정규화)
         # ========================================
         
         # 1.1 RMSE (정규화: 0~1)
@@ -1064,7 +1077,9 @@ class PIDGainOptimizationEnvironment:
         
         # 1.5 오차 분산 (정규화: 진동성 지표)
         error_variance = np.var(errors)
-        variance_n = np.clip(error_variance / (target_force**2), 0.0, 1.0)
+        # 스펙 기준(±0.5N)으로 정규화 (기존: target_force^2는 너무 커서 영향 미미)
+        var_norm = max(Constants.BAND_TOLERANCE_N, 1e-6)  # 0.5N
+        variance_n = np.clip(error_variance / (var_norm**2), 0.0, 1.0)
         
         # ========================================
         # 2. 제어 신호 품질 지표 (정규화)
@@ -1078,98 +1093,164 @@ class PIDGainOptimizationEnvironment:
             u_array = np.array(pi_output_data, dtype=np.float64)
             u_max = Constants.PI_OUTPUT_MAX  # 0.4 MPa
             
+            # PI 출력 데이터의 독립적인 샘플링 레이트 계산
+            # (force 데이터와 샘플링이 다를 수 있음)
+            fs_u = len(u_array) / episode_len_s
+            dt_u = 1.0 / max(fs_u, 1e-9)  # 0으로 나누기 방지
+            
             # 2.1 제어 노력 (RMS, 정규화: 0~1)
-            u_rms = np.sqrt(np.mean(u_array**2))
+            u_rms = float(np.sqrt(np.mean(u_array**2)))
             u_rms_n = np.clip(u_rms / u_max, 0.0, 1.0)
             
             # 2.2 제어 변화율 (RMS, 정규화: 0~1)
             if len(u_array) > 1:
-                du = np.diff(u_array) / dt
-                du_rms = np.sqrt(np.mean(du**2))
-                du_rms_n = np.clip(du_rms / (u_max / dt), 0.0, 1.0)
+                du = np.diff(u_array) / dt_u  # 올바른 dt_u 사용
+                du_rms = float(np.sqrt(np.mean(du**2)))
+                # 물리적 최대값: 한 스텝에 -u_max → +u_max 변화 가정
+                du_rms_n = np.clip(du_rms / (2.0 * u_max / dt_u), 0.0, 1.0)
             
             # 2.3 포화 비율 (정규화: 0~1)
             sat_threshold = Constants.PI_OUTPUT_SAT_THRESHOLD * u_max  # 95%
-            sat_ratio = np.mean(np.abs(u_array) >= sat_threshold)
+            sat_ratio = float(np.mean(np.abs(u_array) >= sat_threshold))
         
         # ========================================
-        # 3. 보상 계산 (연속형, 정규화된 항목 기반)
+        # 3. 품질 점수 변환 (높을수록 좋게 변환)
         # ========================================
         
-        reward = (
-            +Constants.REWARD_WEIGHT_BAND * band_ratio           # 밴드 유지 (높을수록 좋음)
-            -Constants.REWARD_WEIGHT_RMSE * rmse_n               # RMSE 페널티
-            -Constants.REWARD_WEIGHT_OVERSHOOT * overshoot_n     # 오버슈트 페널티
-            -Constants.REWARD_WEIGHT_SETTLING * settling_n       # 정착시간 페널티
-            -Constants.REWARD_WEIGHT_VARIANCE * variance_n       # 진동성 페널티
-            -Constants.REWARD_WEIGHT_U_RMS * u_rms_n             # 제어 노력 페널티
-            -Constants.REWARD_WEIGHT_DU_RMS * du_rms_n           # 제어 변화율 페널티
-            -Constants.REWARD_WEIGHT_SATURATION * sat_ratio      # 포화 페널티
+        q_band = np.clip(band_ratio, 0.0, 1.0)           # 이미 높을수록 좋음
+        q_rmse = np.clip(1.0 - rmse_n, 0.0, 1.0)        # 낮을수록 좋음 → 뒤집기
+        q_os   = np.clip(1.0 - overshoot_n, 0.0, 1.0)   # 낮을수록 좋음 → 뒤집기
+        q_set  = np.clip(1.0 - settling_n, 0.0, 1.0)    # 낮을수록 좋음 → 뒤집기
+        q_var  = np.clip(1.0 - variance_n, 0.0, 1.0)    # 낮을수록 좋음 → 뒤집기
+        q_u    = np.clip(1.0 - u_rms_n, 0.0, 1.0)       # 낮을수록 좋음 → 뒤집기
+        q_du   = np.clip(1.0 - du_rms_n, 0.0, 1.0)      # 낮을수록 좋음 → 뒤집기
+        q_sat  = np.clip(1.0 - sat_ratio, 0.0, 1.0)     # 낮을수록 좋음 → 뒤집기
+        
+        # ========================================
+        # 4. 점진적 보상 계산 (Shaped Reward)
+        # ========================================
+        
+        # 4.1 가중합 계산 (선형 점수, 0~1 범위)
+        w = Constants.QUALITY_WEIGHTS
+        linear_score = (
+            w['band'] * q_band +
+            w['rmse'] * q_rmse +
+            w['os']   * q_os   +
+            w['set']  * q_set  +
+            w['var']  * q_var  +
+            w['u']    * q_u    +
+            w['du']   * q_du   +
+            w['sat']  * q_sat
         )
         
-        # ========================================
-        # 4. 이상적 성능 보너스 (축소, 연속형)
-        # ========================================
+        # 4.2 비선형 변환 - 목표 근처에서 가속 효과
+        # score^1.5: 초기 개선도 보상, 후기 개선은 더 큰 보상
+        # 예: 0.3^1.5=0.164, 0.6^1.5=0.465, 0.9^1.5=0.855
+        # 증가폭: +0.301 → +0.390 (가속!)
+        nonlinear_score = linear_score ** Constants.REWARD_NONLINEAR_EXP
         
-        ideal_bonus = 0.0
-        ideal_conditions = {
-            'high_band_ratio': band_ratio >= 0.8,          # 80% 이상 밴드 유지
-            'low_rmse': rmse_n <= 0.02,                    # RMSE 매우 낮음
-            'low_overshoot': overshoot_n <= 0.02,          # 오버슈트 거의 없음
-            'fast_settling': settling_time_s <= 1.2,       # 1.2초 이내 정착
-            'low_variance': variance_n <= 0.01,            # 진동 거의 없음
-            'no_saturation': sat_ratio <= 0.05             # 포화 5% 이하
-        }
-        
-        ideal_count = sum(ideal_conditions.values())
-        
-        if ideal_count >= 6:  # 모든 조건 달성
-            ideal_bonus = 3.0
-            print("🎉 [완벽한 성능] 모든 조건 달성! +3 보너스")
-        elif ideal_count >= 4:  # 대부분 조건 달성
-            ideal_bonus = 2.0
-        elif ideal_count >= 2:  # 일부 조건 달성
-            ideal_bonus = 1.0
-        
-        reward += ideal_bonus
+        # 4.3 기본 보상 (0~20 범위)
+        base_reward = Constants.REWARD_BASE_SCALE * nonlinear_score
         
         # ========================================
-        # 5. 안전 위반 페널티
+        # 5. 연속적 균형 보너스 (병목 방지)
         # ========================================
         
-        if max_force > Constants.SAFETY_FORCE_LIMIT:
-            reward += Constants.REWARD_MIN
-            print(f"⚠️ [안전 위반] 최대 힘: {max_force:.1f}N > {Constants.SAFETY_FORCE_LIMIT}N")
+        # 핵심 6개 지표의 최소값 기반 (모든 지표가 좋아야 보너스)
+        quality_scores = [q_band, q_rmse, q_os, q_set, q_var, q_sat]
+        min_quality = min(quality_scores)
+        
+        # 최소값의 제곱으로 병목 효과 (한 지표라도 나쁘면 보너스 감소)
+        balance_bonus = Constants.REWARD_BALANCE_SCALE * (min_quality ** Constants.REWARD_BALANCE_EXP)
         
         # ========================================
-        # 6. 메트릭 딕셔너리 (로깅용)
+        # 6. 연속적 안전 페널티 (Sigmoid)
         # ========================================
         
-        # 기존 호환성을 위한 비정규화 값들
+        def soft_safety_penalty(max_f, limit, sharpness, margin):
+            """
+            Sigmoid 기반 연속적 안전 페널티
+            - limit 이하: 0
+            - limit ~ limit+margin: 작은 페널티로 부드럽게 시작
+            - limit+margin 이상: sigmoid로 급격히 증가
+            """
+            excess = max_f - limit
+            if excess <= 0:
+                return 0.0
+            
+            # margin을 고려한 부드러운 전환
+            if excess <= margin:
+                # margin 구간: 선형 증가 (0% → 10%)
+                penalty_ratio = (excess / margin) * 0.1
+            else:
+                # margin 초과: sigmoid로 급격히 증가 (10% → 100%)
+                adjusted_excess = excess - margin
+                sigmoid_val = 1.0 / (1.0 + np.exp(-sharpness * adjusted_excess))
+                penalty_ratio = 0.1 + 0.9 * sigmoid_val
+            
+            # 수정: 곱하기(*) 사용 (기존 나누기(/) 버그 수정)
+            penalty = Constants.SAFETY_PENALTY_MAX * penalty_ratio
+            return penalty
+        
+        safety_penalty = soft_safety_penalty(
+            max_force, 
+            Constants.SAFETY_FORCE_LIMIT, 
+            Constants.SAFETY_PENALTY_SHARPNESS,
+            Constants.SAFETY_PENALTY_MARGIN
+        )
+        
+        # 안전 위반 시 경고 출력 (페널티가 음수이므로 <= 사용)
+        if safety_penalty <= -1.0:  # 페널티가 -1 이하일 때
+            print(f"⚠️ [안전 경고] 최대 힘: {max_force:.1f}N, 페널티: {safety_penalty:.1f}")
+        
+        # ========================================
+        # 7. 최종 보상 합산
+        # ========================================
+        
+        reward = base_reward + balance_bonus + safety_penalty
+        
+        # ========================================
+        # 8. 메트릭 딕셔너리 (로깅 및 분석용)
+        # ========================================
+        
         metrics = {
-            # 기본 지표 (기존 호환)
+            # 기본 지표 (비정규화, 기존 호환)
             'rmse': float(rmse),
             'overshoot': float(overshoot_pct * 100),  # % 단위
             'settling_time': float(settling_time_s),
             'band_time': float(band_ratio * episode_len_s),
             'out_of_band_time': float((1.0 - band_ratio) * episode_len_s),
             
-            # 정규화된 지표 (새로 추가)
+            # 정규화된 지표 (0~1 범위)
             'rmse_n': float(rmse_n),
             'overshoot_n': float(overshoot_n),
             'settling_n': float(settling_n),
             'band_ratio': float(band_ratio),
             'variance_n': float(variance_n),
             
-            # 제어 신호 품질 (새로 추가)
+            # 제어 신호 품질
             'u_rms': float(u_rms_n * Constants.PI_OUTPUT_MAX) if pi_output_data else 0.0,
             'u_rms_n': float(u_rms_n),
             'du_rms_n': float(du_rms_n),
             'sat_ratio': float(sat_ratio),
             
-            # 이상 조건
-            'ideal_count': ideal_count,
-            'ideal_bonus': float(ideal_bonus),
+            # 품질 점수 (높을수록 좋음, 0~1)
+            'q_band': float(q_band),
+            'q_rmse': float(q_rmse),
+            'q_os': float(q_os),
+            'q_set': float(q_set),
+            'q_var': float(q_var),
+            'q_u': float(q_u),
+            'q_du': float(q_du),
+            'q_sat': float(q_sat),
+            
+            # 보상 구성 요소 (점진적 보상 분석용)
+            'linear_score': float(linear_score),
+            'nonlinear_score': float(nonlinear_score),
+            'base_reward': float(base_reward),
+            'balance_bonus': float(balance_bonus),
+            'safety_penalty': float(safety_penalty),
+            'min_quality': float(min_quality),
             
             # 기타
             'max_force': float(max_force),

@@ -14,7 +14,7 @@
 - **알고리즘**: Soft Actor-Critic (SAC) - 연속 행동 공간에 적합한 Off-policy 알고리즘
 - **제어 대상**: 공압 연마 로봇의 힘 제어 시스템
 - **학습 방식**: 에피소드 기반 학습 (각 에피소드 15초)
-- **통신 방식**: TCP/IP 소켓 통신 (1000Hz 수신)
+- **통신 방식**: TCP/IP 소켓 통신 (1kHz 데이터 교환)
 
 ---
 
@@ -32,8 +32,6 @@ pid_gain_rl/
 │       └── episode_rewards.png       # 보상 추이 그래프
 ├── saved_agents/                     # 학습된 모델 저장
 │   └── test_best_agent_episode_X_reward_Y.pth
-├── tele/
-│   └── test_server.py               # 테스트용 서버
 └── README.md                         # 본 문서
 ```
 
@@ -53,24 +51,30 @@ pid_gain_rl/
 - **특징**:
   - 자동 엔트로피 조정 (α 자동 튜닝)
   - Tanh activation으로 PID 게인 범위 제한
+  - 에피소드당 1개 transition 저장 (Episodic RL)
 
 #### 🌍 `PIDGainOptimizationEnvironment`
 - **역할**: 강화학습 환경 관리 및 보상 계산
 - **주요 기능**:
-  - 에피소드 실행 및 데이터 수집
+  - 에피소드 실행 및 데이터 수집 (1kHz)
   - 18개 제어공학 지표 기반 보상 계산
   - 학습 진행 모니터링
   - 최고 성능 모델 저장
 - **핵심 메서드**:
   - `run_pid_optimization_training()`: 메인 학습 루프
   - `calculate_episode_reward()`: 보상 계산 (8개 정규화 지표)
-  - `collect_episode_data()`: 에피소드 데이터 수집
+  - 에피소드당 15초 동안 힘/PI 출력 데이터 수집
 
-#### 📡 `PIDGainCommunicator`
+#### 📡 `RobotCommunication`
 - **역할**: 로봇 제어 PC와 TCP/IP 통신
 - **기능**:
-  - PID 게인 전송 (에피소드 시작 시)
-  - 힘 데이터 수신 (1000Hz)
+  - **PID 게인 전송**: 
+    - 첫 에피소드: 시작 시 전송
+    - 이후 에피소드: 종료 시 다음 에피소드 PID 미리 전송
+  - **상태 데이터 수신**: 1kHz로 힘, 에러, PI 출력 등 수신
+  - **플래그 전송**:
+    - `episode_done`: 에피소드 종료 시 True
+    - `learning_done`: 전체 학습 완료 시 True
   - 통신 오류 처리 및 재연결
 
 #### 📊 로깅 시스템
@@ -86,7 +90,7 @@ pid_gain_rl/
 
 ```python
 state = [
-    # [0-5] 로봇 제어 PC에서 전송
+    # [0-5] 로봇 제어 PC에서 전송 (1kHz)
     force_error,           # 힘 오차 (정규화)
     force_error_dot,       # 힘 오차 변화율
     current_force,         # 현재 힘 (정규화)
@@ -116,6 +120,8 @@ Kp: [56.0, 104.0]
 Ki: [91.0, 169.0]
 Kd: [0.0, 15.0]
 ```
+
+**첫 에피소드는 기준값 사용**: `Kp=80, Ki=130, Kd=0`
 
 ---
 
@@ -151,6 +157,11 @@ reward = (
 - **PI 출력 최대값**: 0.4 MPa
 - **포화 임계값**: 95% 이상
 
+#### 보상 함수 특징
+- **주파수 독립적**: 샘플링 주파수 자동 계산 (fs = n_samples / episode_len_s)
+- **모든 지표 정규화**: [0,1] 범위로 통일하여 가중치 해석 용이
+- **연속형 보상**: 불연속 보너스 최소화하여 학습 안정성 향상
+
 ---
 
 ### 5. 학습 파라미터
@@ -163,19 +174,20 @@ HIDDEN_DIM = 256
 LEARNING_RATE = 3e-4
 
 # 강화학습
-GAMMA = 0.99                    # 할인 인수
+GAMMA = 0.99                    # 할인 인수 (한 스텝 MDP이므로 영향 없음)
 TAU = 0.01                      # 소프트 업데이트 계수
 BATCH_SIZE = 128                # 배치 크기
-REPLAY_BUFFER_SIZE = 2000       # 리플레이 버퍼 크기
-UPDATES_PER_EPISODE = 16        # 에피소드당 업데이트 횟수
+REPLAY_BUFFER_SIZE = 4000       # 리플레이 버퍼 크기 (500 에피소드 × 8배)
+UPDATES_PER_EPISODE = 16        # 에피소드당 업데이트 횟수 (동적 조정)
 
 # 에피소드
-EPISODES = 250                  # 총 에피소드 수
+EPISODES = 500                  # 총 에피소드 수
 EPISODE_SECONDS = 15.0          # 에피소드 길이 (초)
 TARGET_FORCE = 45.0             # 목표 힘 (N) - 고정값
 
 # 통신
 RECV_FREQ_HZ = 1000             # 수신 주파수 (1kHz)
+HOST = "0.0.0.0"                # 서버 주소
 PORT = 8888                     # TCP 포트
 ```
 
@@ -186,46 +198,63 @@ PORT = 8888                     # TCP 포트
 ### 에피소드 실행 흐름
 
 ```
-1. 에피소드 시작
+1. 에피소드 N 시작
    ├─ 상태 초기화 (이전 PID, 히스토리 활용)
-   ├─ Actor가 PID 게인 결정
-   └─ 로봇 제어 PC로 PID 게인 전송
+   ├─ N=0: PID (80, 130, 0) 전송 후 시작
+   └─ N≥1: 이전 에피소드 종료 시 받은 PID 사용
 
 2. 데이터 수집 (15초)
-   ├─ 1000Hz로 힘 데이터 수신
-   ├─ PI 출력 데이터 수집
-   └─ 실시간 모니터링
+   ├─ 1kHz로 힘 데이터 수신 및 저장
+   ├─ 1kHz로 PI 출력 데이터 수집
+   └─ 총 약 15,000개 데이터 포인트 수집
 
 3. 에피소드 종료
-   ├─ 보상 계산 (18개 제어 지표)
-   ├─ 성능 지표 분석
-   ├─ Replay Buffer 저장
-   └─ 신경망 업데이트 (16회)
+   ├─ 15초 데이터로 보상 계산 (18개 제어 지표)
+   ├─ 성능 지표 분석 및 로깅
+   ├─ Replay Buffer에 1개 transition 저장
+   ├─ 신경망 업데이트 (최대 16회)
+   └─ 다음 에피소드 PID 미리 계산 및 전송 (episode_done=True)
 
 4. 학습 진행
-   ├─ 최고 성능 모델 저장
+   ├─ 최고 성능 모델 자동 저장
    ├─ 로그 기록 (CSV, PNG)
    └─ 다음 에피소드로
+
+5. 학습 완료
+   ├─ 모든 에피소드 완료 시 learning_done=True 전송
+   └─ 최종 데이터 저장 및 연결 종료
 ```
 
 ### 주요 데이터 흐름
 
 ```
-강화학습 PC (Python)         로봇 제어 PC (C++)
-      ↓                            ↓
-[SAC Agent]                  [PID Controller]
-      ↓                            ↓
-  PID 게인 ─────전송(TCP)────→  힘 제어
-      ↑                            ↓
-힘 데이터 ←────수신(TCP)─────  센서 측정
+강화학습 PC (Python)                    로봇 제어 PC (C++)
+      ↓                                       ↓
+[SAC Agent]                             [PID Controller]
+      ↓                                       ↓
+  에피소드 1 시작                            
+      ↓                                       
+  PID (80,130,0) ────────전송(TCP)────→  PID 적용
+      ↑                                       ↓
+힘/PI 출력 ←──────수신(TCP, 1kHz)──────  센서 측정 (15초)
+      ↓                                       
+  보상 계산                                 
+      ↓                                       
+  학습 (16회)                               
+      ↓                                       
+  다음 PID 계산                             
+      ↓                                       ↑
+  PID + episode_done=True ─────전송────→  다음 PID 저장
+      ↓                                       ↓
+  에피소드 2 시작                         저장된 PID 적용
+      ↓                                       ↓
+  (반복)                                  센서 측정 (15초)
       ↓
-[Environment]
+  ...
       ↓
-  보상 계산
+  모든 에피소드 완료
       ↓
-[Replay Buffer]
-      ↓
-  신경망 학습
+  learning_done=True ──────전송─────→  제어 종료
 ```
 
 ---
@@ -246,7 +275,7 @@ PORT = 8888                     # TCP 포트
 9. **RMSE (정규화)**: 0~1 범위
 10. **오버슈트 (정규화)**: 0~1 범위
 11. **정착 시간 (정규화)**: 0~1 범위
-12. **밴드 유지 비율**: 0~1 범위
+12. **밴드 유지 비율**: 0~1 범위 (핵심 지표)
 13. **오차 분산 (정규화)**: 0~1 범위
 14. **PI 출력 RMS (정규화)**: 제어 노력
 15. **PI 출력 변화율 (정규화)**: 제어 부드러움
@@ -280,26 +309,36 @@ python JY_PID_Gain_SAC_1_test.py
 ### 3. 학습 파라미터 수정
 
 ```python
-# JY_PID_Gain_SAC_1_test.py 파일 내에서 수정
+# JY_PID_Gain_SAC_1_test.py 파일 내 Constants 클래스에서 수정
 
-# 수신 주파수 변경 (line ~2754)
-RECV_FREQUENCY_HZ = 1000  # 기본값: 1000Hz
+# 에피소드 수 변경
+DEFAULT_EPISODES = 500  # 기본값: 500
 
-# 에피소드 수 변경 (line ~96)
-DEFAULT_EPISODES = 250  # 기본값: 250
-
-# 에피소드 길이 변경 (line ~98)
+# 에피소드 길이 변경
 DEFAULT_EPISODE_SECONDS = 15.0  # 기본값: 15초
 
-# 목표 힘 변경 (line ~99)
+# 목표 힘 변경
 DEFAULT_TARGET_FORCE = 45.0  # 기본값: 45N
+
+# 밴드 허용 오차 변경
+BAND_TOLERANCE_N = 0.5  # 기본값: ±0.5N
+
+# 보상 가중치 조정
+REWARD_WEIGHT_BAND = 1.5       # 밴드 유지
+REWARD_WEIGHT_RMSE = 1.2       # RMSE
+REWARD_WEIGHT_OVERSHOOT = 0.7  # 오버슈트
+# ... (기타 가중치)
 ```
 
 ### 4. 학습 중단
 
 ```bash
 # Ctrl+C로 안전하게 중단
-# 자동으로 데이터 저장 및 종료 신호 전송
+# 자동으로:
+# - learning_done=True 신호 전송
+# - 데이터 저장 (CSV, PNG)
+# - 최종 모델 저장
+# - 연결 종료
 ```
 
 ---
@@ -343,6 +382,185 @@ saved_agents/
 
 ---
 
+## 🤖 로봇제어PC 구현 가이드
+
+### 필수 구현 사항
+
+강화학습 PC와 통신하기 위해 로봇제어PC(C++)에서 구현해야 할 핵심 기능들입니다.
+
+#### 1. PID 게인 패킷 수신 구조체
+
+```cpp
+// Protocol.h에 추가
+#pragma pack(push, 1)
+struct PIDGainPacket {
+    unsigned short  sof;              // 0xCCCC (2 bytes)
+    float           Kp;               // P 게인 (4 bytes)
+    float           Ki;               // I 게인 (4 bytes)
+    float           Kd;               // D 게인 (4 bytes)
+    bool            timing_accurate;  // 타이밍 정확성 (1 byte)
+    bool            episode_done;     // 에피소드 종료 플래그 (1 byte)
+    bool            learning_done;    // 학습 종료 플래그 (1 byte)
+    unsigned short  checksum;         // CRC-16 체크섬 (2 bytes)
+};
+#pragma pack(pop)
+
+bool UnpackPIDGainPacket(const char* buffer, int length, PIDGainPacket& outPacket);
+```
+
+#### 2. PID 게인 관리 클래스
+
+```cpp
+class PIDGainManager {
+private:
+    float m_currentKp, m_currentKi, m_currentKd;  // 현재 사용 중
+    float m_nextKp, m_nextKi, m_nextKd;           // 다음 에피소드용
+    bool m_hasNextGain;
+    bool m_episodeActive;
+    bool m_learningActive;
+    std::mutex m_gainMutex;
+
+public:
+    // PID 게인 수신 처리
+    void ReceivePIDGain(const PIDGainPacket& packet);
+    
+    // 에피소드 시작 (다음 PID 적용)
+    void StartEpisode();
+    
+    // 현재 PID 가져오기
+    void GetCurrentGains(float& kp, float& ki, float& kd);
+    
+    // 학습 종료 확인
+    bool IsLearningDone() const;
+};
+```
+
+#### 3. TCP 수신 처리
+
+```cpp
+// TcpClient의 수신 스레드에서
+if (packet_sof == 0xCCCC) {  // PID 게인 패킷
+    PIDGainPacket pidPacket;
+    if (UnpackPIDGainPacket(buffer, length, pidPacket)) {
+        m_pidGainManager.ReceivePIDGain(pidPacket);
+    }
+}
+```
+
+#### 4. 메인 제어 루프
+
+```cpp
+// 에피소드 관리
+bool episode_active = false;
+double episode_start_time = 0.0;
+const double EPISODE_DURATION = 15.0;  // 15초
+
+// 메인 루프 (1kHz)
+while (control_active) {
+    // 에피소드 시작 감지
+    if (!episode_active && m_pidGainManager.HasNextGain()) {
+        m_pidGainManager.StartEpisode();
+        
+        // 새 PID 게인 적용
+        float kp, ki, kd;
+        m_pidGainManager.GetCurrentGains(kp, ki, kd);
+        m_pidctrl.setGains(kp, ki, kd);
+        
+        episode_active = true;
+        episode_start_time = GetCurrentTime();
+    }
+    
+    // 센서 데이터 읽기
+    float currentForce = ReadForceZ();
+    float error = target_force - currentForce;
+    
+    // PID 제어
+    float pid_output = m_pidctrl.compute(error, dt);
+    ApplyControl(pid_output);
+    
+    // 상태 패킷 전송 (1kHz)
+    std::vector<char> packet = PackRobotStatus(
+        currentForce, target_force, error, 
+        error_dot, error_integral, pid_output, sander_active
+    );
+    m_tcpClient.Send(packet.data(), packet.size());
+    
+    // 에피소드 종료 감지 (15초)
+    if (episode_active && 
+        (GetCurrentTime() - episode_start_time) >= EPISODE_DURATION) {
+        episode_active = false;
+    }
+    
+    // 학습 종료 확인
+    if (m_pidGainManager.IsLearningDone()) {
+        StopControl();
+        break;
+    }
+    
+    Sleep(1);  // 1ms
+}
+```
+
+#### 5. 상태 패킷 전송 (1kHz)
+
+```cpp
+// 이미 구현된 PythonCommPacket 사용
+std::vector<char> packet = PackRobotStatus(
+    current_forceZ,       // 현재 힘
+    target_forceZ,        // 목표 힘
+    error_forceZ,         // 힘 오차
+    error_forceZ_dot,     // 힘 오차 미분
+    error_forceZ_int,     // 힘 오차 적분
+    cur_PID_output,       // PI 출력
+    sander_active_flag    // 샌더 활성 상태
+);
+m_tcpClient.Send(packet.data(), packet.size());
+```
+
+### 구현 체크리스트
+
+- [ ] `Protocol.h`에 `PIDGainPacket` 구조체 추가
+- [ ] `UnpackPIDGainPacket()` 함수 구현
+- [ ] `PIDGainManager` 클래스 구현
+- [ ] TCP 수신 처리에 PID 게인 패킷 핸들링 추가
+- [ ] 메인 루프에 에피소드 시작/종료 로직 추가
+- [ ] PID 게인 적용 타이밍 제어
+- [ ] 15초 타이머 구현
+- [ ] learning_done 플래그 처리
+- [ ] 스레드 안전성 보장 (mutex)
+- [ ] 로깅 및 디버깅 메시지 추가
+
+### 통신 프로토콜 요약
+
+| 방향 | 패킷 종류 | SOF | 주파수 | 내용 |
+|------|----------|-----|--------|------|
+| RL→Robot | PID Gain | 0xCCCC | 에피소드 시작/종료 시 | Kp, Ki, Kd, episode_done, learning_done |
+| Robot→RL | State | 0xAAAA | 1kHz | Force, Error, PI output, Sander active |
+
+### 에피소드 타이밍 다이어그램
+
+```
+에피소드 1:
+  [RL] 시작 시 PID (80,130,0) 전송 → [Robot] 적용
+  [Robot] 15초간 1kHz 데이터 전송 → [RL] 수집
+  [RL] 보상 계산 → 학습 → 다음 PID 계산
+  [RL] 종료 시 다음 PID + episode_done=True 전송 → [Robot] 저장
+
+에피소드 2:
+  [Robot] 저장된 PID 적용 (전송 없음)
+  [Robot] 15초간 1kHz 데이터 전송 → [RL] 수집
+  [RL] 보상 계산 → 학습 → 다음 PID 계산
+  [RL] 종료 시 다음 PID + episode_done=True 전송 → [Robot] 저장
+
+... (반복)
+
+마지막 에피소드:
+  [RL] 종료 시 learning_done=True 전송
+  [Robot] 학습 완료 확인 → 제어 종료
+```
+
+---
+
 ## 🔧 향후 개선 방향
 
 ### 1. 알고리즘 개선
@@ -361,7 +579,7 @@ saved_agents/
 - [ ] **적응형 가중치**: 학습 단계별 가중치 자동 조정
 - [ ] **다목적 최적화**: Pareto-optimal 솔루션 탐색
 - [ ] **안전 제약 강화**: Constrained RL 적용
-- [ ] **실시간 피드백**: 스텝별 중간 보상 추가
+- [ ] **ITAE 추가**: 시간 가중 절대 오차 적분 (선택적)
 
 ### 4. 학습 효율성 향상
 - [ ] **Curriculum Learning**: 쉬운 조건부터 점진적 학습
@@ -374,18 +592,6 @@ saved_agents/
 - [ ] **자동 하이퍼파라미터 튜닝**: Optuna 등 활용
 - [ ] **모델 압축**: 실시간 추론 속도 향상
 - [ ] **A/B 테스트 프레임워크**: 기존 제어기와 성능 비교
-
-### 6. 안전성 강화
-- [ ] **Safe RL 적용**: 학습 중 안전 보장
-- [ ] **이상 탐지**: 비정상 동작 실시간 감지
-- [ ] **페일세이프 메커니즘**: 통신 두절 시 안전 모드
-- [ ] **Sim-to-Real 검증**: 시뮬레이션 선행 학습 후 실제 적용
-
-### 7. 데이터 분석 강화
-- [ ] **Feature Importance 분석**: 상태 변수 중요도 분석
-- [ ] **Ablation Study**: 보상 구성 요소별 기여도 분석
-- [ ] **Sensitivity Analysis**: 하이퍼파라미터 민감도 분석
-- [ ] **벤치마크 데이터셋**: 표준 성능 평가 기준 마련
 
 ---
 
@@ -412,34 +618,41 @@ saved_agents/
 
 ### 논문
 - [Soft Actor-Critic (SAC)](https://arxiv.org/abs/1801.01290) - Haarnoja et al., 2018
-- [PID Controller Tuning using RL](https://ieeexplore.ieee.org/) - 관련 연구들
+- [Soft Actor-Critic Algorithms](https://arxiv.org/abs/1812.05905) - Haarnoja et al., 2019
+- PID Controller Tuning using RL - 관련 연구들
 
 ### 코드 레퍼런스
 - PyTorch 공식 문서: https://pytorch.org/docs/
 - OpenAI Spinning Up: https://spinningup.openai.com/
+- Stable Baselines3: https://stable-baselines3.readthedocs.io/
 
 ---
 
 ## 👥 개발자 정보
 
-- **프로젝트**: Robot Polishing RL System
-- **목적**: 공압 연마 로봇의 지능형 PID 게인 최적화
+- **프로젝트**: Robot Polishing RL System - PID Gain Optimization
+- **목적**: 공압 연마 로봇의 지능형 PID 게인 자동 최적화
 - **환경**: Python 3.x, PyTorch, NumPy, Matplotlib
-- **시스템**: Linux (Ubuntu), 1000Hz 실시간 통신
+- **시스템**: Linux (Ubuntu), 1kHz 실시간 통신
+- **알고리즘**: Soft Actor-Critic (SAC)
 
 ---
 
 ## 📝 변경 이력
 
-### Version: JY_PID_Gain_SAC_1_test.py
-- SAC 알고리즘 기반 PID 게인 최적화
-- 18개 제어 성능 지표 통합
-- 에피소드 기반 학습 (15초)
-- 정규화된 보상 함수 적용
-- 히스토리 기반 상태 표현
-- 종합 로깅 시스템 (3개 Logger)
-- 안전 메커니즘 강화
-- 재현성 보장 (시드 고정)
+### Version: JY_PID_Gain_SAC_1_test.py (2025-09-30)
+- ✅ SAC 알고리즘 기반 PID 게인 최적화
+- ✅ 18개 제어 성능 지표 통합
+- ✅ 에피소드 기반 학습 (15초, 1kHz 수집)
+- ✅ 정규화된 보상 함수 적용
+- ✅ 주파수 독립적 보상 계산
+- ✅ 히스토리 기반 상태 표현 (최근 5개 에피소드)
+- ✅ 종합 로깅 시스템 (3개 Logger)
+- ✅ 에피소드 종료 신호 전송 (episode_done)
+- ✅ 학습 완료 신호 전송 (learning_done)
+- ✅ Ctrl+C 안전 종료 메커니즘
+- ✅ 재현성 보장 (시드 고정: 42)
+- ✅ 로봇제어PC 통신 프로토콜 정의
 
 ---
 
@@ -449,11 +662,6 @@ saved_agents/
 
 ---
 
-## 📧 문의
-
-프로젝트 관련 문의사항은 개발팀에 연락 바랍니다.
-
----
-
-**Last Updated**: 2025-09-30
-**Version**: 1.0
+**Last Updated**: 2025-09-30  
+**Version**: 1.0  
+**Status**: Production Ready ✅

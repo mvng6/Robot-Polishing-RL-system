@@ -104,14 +104,26 @@ Python RL 에이전트는 로봇의 상태(접촉력, 오차 등)를 실시간�
     * **[힘 제어 시작]** 버튼을 누르면 `Thread_Contact_Flat_RL` 스레드가 활성화되어 강화학습 기반의 폴리싱 작업을 시작합니다.
   
 
-## 🚀 수정 사항
+## 🚀 최신 개발 사항
 
+### PID Gain Optimization (신규)
+- **알고리즘**: SAC (Soft Actor-Critic) 기반 PID 게인 자동 최적화
+- **학습 방식**: 에피소드 기반 학습 (15초 × 500회)
+- **통신**: 1kHz 양방향 TCP/IP 통신
+- **특징**:
+  - 에피소드 종료 시 다음 PID 미리 전송
+  - 18개 제어 성능 지표 통합 보상
+  - 정규화된 연속형 보상 함수
+  - 안전 종료 메커니즘 (Ctrl+C)
+- **위치**: `py_rl/pid_gain_rl/experiment/JY_PID_Gain_SAC_1_test.py`
+
+### Residual RL (기존)
 * **C++**
-   * 매 에피소드마다 환경 리셋 시퀀스 추가(C++)
-   * Desired Force 범위 수정(35 ~50N)
+   * 매 에피소드마다 환경 리셋 시퀀스 추가
+   * Desired Force 범위 수정 (35~50N)
 
 *  **Python**
-   *  Residual RL 인가 압력 범위 수정 (-0.05 ~ 0.05)
-   *  코드 리팩토링
-   *  강화학습 중간 중단 (Ctrl+C) 또는 강화학습 종료 시, 로봇제어PC로 종료 flag 전송
+   * Residual RL 인가 압력 범위 수정 (-0.05 ~ 0.05)
+   * 코드 리팩토링
+   * 강화학습 중간 중단 (Ctrl+C) 또는 강화학습 종료 시, 로봇제어PC로 종료 flag 전송
 
