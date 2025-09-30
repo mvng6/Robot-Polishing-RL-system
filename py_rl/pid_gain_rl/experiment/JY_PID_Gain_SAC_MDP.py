@@ -994,6 +994,7 @@ class PIDGainOptimizationEnvironment:
         
         # ==== ADDED: 이전 에피소드 정보 추적 ====
         self.previous_pid_gains = None  # 이전 에피소드의 PID gain
+        self.pid_gains_next = None  # 다음 에피소드에 실제로 적용할 PID (미리 전송한 값)
         self.historical_errors = []  # 이전 에피소드들의 에러 통계
         self.episode_count = 0  # 에피소드 카운터
         
@@ -1330,24 +1331,20 @@ class PIDGainOptimizationEnvironment:
                     []
                 )
             
-            # 2. PID gain 선택 (에피소드당 한 번)
+            # 2. PID gain 사용 (실제로 로봇에 적용된 PID)
             if ep == 0:
                 # 첫 에피소드: 로봇제어PC 자체 PID 사용 (P=80, I=130, D=0)
-                # - PID 전송: 하지 않음 (로봇제어PC 하드코딩 값 사용)
-                # - 데이터 수집: 정상 진행 (1kHz로 힘, PI 출력 등 수집)
-                # - 학습: 수집된 데이터로 기준 성능 학습
                 pid_gains = np.array([80.0, 130.0, 0.0], dtype=np.float32)
                 print(f"🎯 [에피소드 1] 로봇제어PC 자체 PID 사용: Kp={pid_gains[0]:.0f}, Ki={pid_gains[1]:.0f}, Kd={pid_gains[2]:.0f}")
-                print(f"ℹ️  [정보] PID 전송 안 함 (로봇제어PC 하드코딩 사용), 데이터 수집 및 학습은 정상 진행")
-                self._log("INFO", f"🎯 에피소드 1 기준 PID (로봇제어PC): Kp={pid_gains[0]:.0f}, Ki={pid_gains[1]:.0f}, Kd={pid_gains[2]:.0f}")
-                # 첫 에피소드는 PID 전송하지 않지만, 데이터 수집/보상 계산/학습은 모두 수행
+                print(f"ℹ️  [정보] PID 전송 안 함 (로봇제어PC 하드코딩 사용)")
+                self._log("INFO", f"🎯 에피소드 1 기준 PID: Kp={pid_gains[0]:.0f}, Ki={pid_gains[1]:.0f}, Kd={pid_gains[2]:.0f}")
             else:
-                # 2번째 에피소드부터: 강화학습으로 PID gain 선택 (이전 에피소드 성능 참고)
-                pid_gains, _ = self.agent.select_action(initial_state, evaluate=False)
-                print(f"🤖 [에피소드 {ep+1}] 강화학습 PID 선택: Kp={pid_gains[0]:.2f}, Ki={pid_gains[1]:.2f}, Kd={pid_gains[2]:.2f}")
-                self._log("INFO", f"🤖 RL PID: Kp={pid_gains[0]:.2f}, Ki={pid_gains[1]:.2f}, Kd={pid_gains[2]:.2f}")
-                print(f"ℹ️  [정보] 이전 에피소드 종료 시 이미 전송된 PID 사용")
-                # 2번째 에피소드부터는 이전 에피소드 종료 시 이미 전송했으므로 여기서는 전송하지 않음
+                # 2번째 에피소드부터: 이전 에피소드 종료 시 전송한 PID 사용
+                assert self.pid_gains_next is not None, f"에피소드 {ep+1}: 이전 에피소드에서 next PID가 설정되지 않았습니다!"
+                pid_gains = self.pid_gains_next.copy()  # ✅ 실제로 로봇에 적용된 PID 사용!
+                print(f"🤖 [에피소드 {ep+1}] 이전 에피소드에서 전송한 PID 사용: Kp={pid_gains[0]:.2f}, Ki={pid_gains[1]:.2f}, Kd={pid_gains[2]:.2f}")
+                self._log("INFO", f"🤖 에피소드 {ep+1} PID: Kp={pid_gains[0]:.2f}, Ki={pid_gains[1]:.2f}, Kd={pid_gains[2]:.2f}")
+                print(f"ℹ️  [정보] 이 PID가 로그/보상/학습에 모두 사용됨 (일관성 보장)")
             
             # 4. PID gain 적용 대기 (새로운 PID gain이 적용될 때까지)
             print("⏳ [대기] PID gain 적용 대기 중... (100ms)")
@@ -1539,22 +1536,24 @@ class PIDGainOptimizationEnvironment:
                 next_initial_state = create_initial_state(
                     [], 
                     self.cfg['TARGET_FORCE'], 
-                    self.previous_pid_gains, 
+                    pid_gains,  # 현재 에피소드의 PID (실제 사용된 것)
                     self.historical_errors,
                     self.episode_history
                 )
                 # 다음 에피소드 PID 게인 선택
                 next_pid_gains, _ = self.agent.select_action(next_initial_state, evaluate=False)
-                print(f"🎯 [다음 에피소드] PID 미리 계산: Kp={next_pid_gains[0]:.2f}, Ki={next_pid_gains[1]:.2f}, Kd={next_pid_gains[2]:.2f}")
+                self.pid_gains_next = next_pid_gains.copy()  # ✅ 저장! (다음 에피소드에서 사용)
+                print(f"🎯 [다음 에피소드] PID 계산 및 저장: Kp={next_pid_gains[0]:.2f}, Ki={next_pid_gains[1]:.2f}, Kd={next_pid_gains[2]:.2f}")
                 self._log("INFO", f"🎯 다음 에피소드 PID: Kp={next_pid_gains[0]:.2f}, Ki={next_pid_gains[1]:.2f}, Kd={next_pid_gains[2]:.2f}")
             else:
                 # 마지막 에피소드인 경우 현재 PID 사용
                 next_pid_gains = pid_gains
+                self.pid_gains_next = next_pid_gains.copy()
             
             # 13. 에피소드 완료 신호 전송 (다음 에피소드 PID 게인과 함께)
             print(f"📤 [전송] 에피소드 {ep+1} 완료 신호 + 다음 PID 전송 중...")
             episode_done_success = self.comm.send_pid_once(
-                next_pid_gains[0], next_pid_gains[1], next_pid_gains[2], 
+                self.pid_gains_next[0], self.pid_gains_next[1], self.pid_gains_next[2],  # ✅ 저장된 값 전송
                 timing_accurate=True, episode_done=True, learning_done=False
             )
             if episode_done_success:
