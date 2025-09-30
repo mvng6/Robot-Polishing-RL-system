@@ -200,27 +200,37 @@ PORT = 8888                     # TCP 포트
 ```
 1. 에피소드 N 시작
    ├─ 상태 초기화 (이전 PID, 히스토리 활용)
-   ├─ N=0: PID (80, 130, 0) 전송 후 시작
-   └─ N≥1: 이전 에피소드 종료 시 받은 PID 사용
+   ├─ N=0: PID 전송 안 함 (로봇제어PC 자체 PID 80, 130, 0 사용)
+   └─ N≥1: 이전 에피소드 종료 시 받은 PID 사용 (전송 안 함)
 
-2. 데이터 수집 (15초)
+2. 데이터 수집 (15초) - 모든 에피소드 동일
    ├─ 1kHz로 힘 데이터 수신 및 저장
    ├─ 1kHz로 PI 출력 데이터 수집
-   └─ 총 약 15,000개 데이터 포인트 수집
+   ├─ 총 약 15,000개 데이터 포인트 수집
+   └─ ⭐ 에피소드 1도 동일하게 데이터 수집 (PID 전송만 안 함)
 
 3. 에피소드 종료
    ├─ 15초 데이터로 보상 계산 (18개 제어 지표)
    ├─ 성능 지표 분석 및 로깅
    ├─ Replay Buffer에 1개 transition 저장
-   ├─ 신경망 업데이트 (최대 16회)
-   └─ 다음 에피소드 PID 미리 계산 및 전송 (episode_done=True)
+   ├─ 신경망 학습 시도:
+   │   └─ Buffer < 2개: 학습 건너뜀 (에피소드 1)
+   │   └─ Buffer ≥ 2개: 학습 수행 (에피소드 2부터, 동적 배치크기)
+   ├─ 다음 에피소드용 PID 계산 (현재 Actor 네트워크 사용)
+   │   └─ 에피소드 1 후: 초기 네트워크로 계산
+   │   └─ 에피소드 2 후: 학습된 네트워크로 계산 (계속 개선됨)
+   └─ 다음 에피소드용 PID + episode_done=True 전송
 
-4. 학습 진행
+4. 로봇제어PC의 PID 관리
+   ├─ 수신한 PID를 임시 변수에 보관 (m_nextKp, m_nextKi, m_nextKd)
+   └─ 다음 에피소드 시작 시 현재 변수로 전환 후 컨트롤러 적용
+
+5. 학습 진행
    ├─ 최고 성능 모델 자동 저장
    ├─ 로그 기록 (CSV, PNG)
    └─ 다음 에피소드로
 
-5. 학습 완료
+6. 학습 완료
    ├─ 모든 에피소드 완료 시 learning_done=True 전송
    └─ 최종 데이터 저장 및 연결 종료
 ```
@@ -232,10 +242,8 @@ PORT = 8888                     # TCP 포트
       ↓                                       ↓
 [SAC Agent]                             [PID Controller]
       ↓                                       ↓
-  에피소드 1 시작                            
-      ↓                                       
-  PID (80,130,0) ────────전송(TCP)────→  PID 적용
-      ↑                                       ↓
+  에피소드 1 시작                         자체 PID (80,130,0) 사용
+      ↓                                       ↓
 힘/PI 출력 ←──────수신(TCP, 1kHz)──────  센서 측정 (15초)
       ↓                                       
   보상 계산                                 
@@ -413,22 +421,38 @@ bool UnpackPIDGainPacket(const char* buffer, int length, PIDGainPacket& outPacke
 ```cpp
 class PIDGainManager {
 private:
-    float m_currentKp, m_currentKi, m_currentKd;  // 현재 사용 중
-    float m_nextKp, m_nextKi, m_nextKd;           // 다음 에피소드용
-    bool m_hasNextGain;
+    // 기본 PID (첫 에피소드용 - 하드코딩, 변수로 변경 가능)
+    const float DEFAULT_KP = 80.0f;
+    const float DEFAULT_KI = 130.0f;
+    const float DEFAULT_KD = 0.0f;
+    
+    float m_currentKp, m_currentKi, m_currentKd;  // 현재 에피소드에서 사용 중인 PID
+    float m_nextKp, m_nextKi, m_nextKd;           // 다음 에피소드에서 사용할 PID (미리 받아둠)
+    bool m_hasNextGain;                           // 다음 PID를 받았는지 여부
     bool m_episodeActive;
     bool m_learningActive;
     std::mutex m_gainMutex;
 
 public:
-    // PID 게인 수신 처리
+    PIDGainManager() 
+        : m_currentKp(DEFAULT_KP), m_currentKi(DEFAULT_KI), m_currentKd(DEFAULT_KD),
+          m_hasNextGain(false), m_episodeActive(false), m_learningActive(true) {}
+    
+    // 강화학습PC로부터 PID 게인 수신 (에피소드 종료 시)
+    // → m_nextKp, m_nextKi, m_nextKd에 보관
     void ReceivePIDGain(const PIDGainPacket& packet);
     
-    // 에피소드 시작 (다음 PID 적용)
+    // 에피소드 시작 시 호출: m_next → m_current 전환
     void StartEpisode();
     
-    // 현재 PID 가져오기
+    // 기본 PID 사용 (첫 에피소드용)
+    void UseDefaultGains();
+    
+    // 현재 사용 중인 PID 가져오기
     void GetCurrentGains(float& kp, float& ki, float& kd);
+    
+    // 다음 PID를 받았는지 확인
+    bool HasNextGain() const;
     
     // 학습 종료 확인
     bool IsLearningDone() const;
@@ -454,17 +478,30 @@ if (packet_sof == 0xCCCC) {  // PID 게인 패킷
 bool episode_active = false;
 double episode_start_time = 0.0;
 const double EPISODE_DURATION = 15.0;  // 15초
+int current_episode = 0;
 
 // 메인 루프 (1kHz)
 while (control_active) {
     // 에피소드 시작 감지
-    if (!episode_active && m_pidGainManager.HasNextGain()) {
-        m_pidGainManager.StartEpisode();
+    if (!episode_active) {
+        current_episode++;
         
-        // 새 PID 게인 적용
+        if (current_episode == 1) {
+            // 첫 에피소드: 하드코딩된 기본 PID 사용
+            m_pidGainManager.UseDefaultGains();
+            printf("에피소드 1: 기본 PID (80, 130, 0) 사용\n");
+        } 
+        else if (m_pidGainManager.HasNextGain()) {
+            // 2번째 에피소드부터: 보관된 PID를 현재로 전환
+            m_pidGainManager.StartEpisode();  // m_current = m_next
+            printf("에피소드 %d: 보관된 PID를 현재 PID로 전환\n", current_episode);
+        }
+        
+        // PID 컨트롤러에 적용
         float kp, ki, kd;
         m_pidGainManager.GetCurrentGains(kp, ki, kd);
         m_pidctrl.setGains(kp, ki, kd);
+        printf("PID 적용: Kp=%.2f, Ki=%.2f, Kd=%.2f\n", kp, ki, kd);
         
         episode_active = true;
         episode_start_time = GetCurrentTime();
@@ -501,7 +538,75 @@ while (control_active) {
 }
 ```
 
-#### 5. 상태 패킷 전송 (1kHz)
+#### 5. PIDGainManager 주요 메서드 구현 예시
+
+```cpp
+void PIDGainManager::ReceivePIDGain(const PIDGainPacket& packet) {
+    std::lock_guard<std::mutex> lock(m_gainMutex);
+    
+    // 다음 에피소드용 PID를 임시 변수에 보관
+    m_nextKp = packet.Kp;
+    m_nextKi = packet.Ki;
+    m_nextKd = packet.Kd;
+    m_hasNextGain = true;
+    
+    // 에피소드 종료 플래그 확인
+    if (packet.episode_done) {
+        printf("에피소드 종료 신호 수신 + 다음 PID 보관: Kp=%.2f, Ki=%.2f, Kd=%.2f\n",
+               m_nextKp, m_nextKi, m_nextKd);
+    }
+    
+    // 학습 종료 플래그 확인
+    if (packet.learning_done) {
+        m_learningActive = false;
+        printf("학습 완료 신호 수신! 제어 종료 준비\n");
+    }
+}
+
+void PIDGainManager::StartEpisode() {
+    std::lock_guard<std::mutex> lock(m_gainMutex);
+    
+    if (m_hasNextGain) {
+        // 보관된 PID를 현재 PID로 전환
+        m_currentKp = m_nextKp;
+        m_currentKi = m_nextKi;
+        m_currentKd = m_nextKd;
+        m_hasNextGain = false;
+        
+        printf("보관된 PID를 현재로 전환: Kp=%.2f, Ki=%.2f, Kd=%.2f\n",
+               m_currentKp, m_currentKi, m_currentKd);
+    }
+}
+
+void PIDGainManager::UseDefaultGains() {
+    std::lock_guard<std::mutex> lock(m_gainMutex);
+    
+    // 기본 PID 사용 (첫 에피소드)
+    m_currentKp = DEFAULT_KP;
+    m_currentKi = DEFAULT_KI;
+    m_currentKd = DEFAULT_KD;
+    
+    printf("기본 PID 사용: Kp=%.2f, Ki=%.2f, Kd=%.2f\n",
+           m_currentKp, m_currentKi, m_currentKd);
+}
+
+void PIDGainManager::GetCurrentGains(float& kp, float& ki, float& kd) {
+    std::lock_guard<std::mutex> lock(m_gainMutex);
+    kp = m_currentKp;
+    ki = m_currentKi;
+    kd = m_currentKd;
+}
+
+bool PIDGainManager::HasNextGain() const {
+    return m_hasNextGain;
+}
+
+bool PIDGainManager::IsLearningDone() const {
+    return !m_learningActive;
+}
+```
+
+#### 6. 상태 패킷 전송 (1kHz)
 
 ```cpp
 // 이미 구현된 PythonCommPacket 사용
@@ -519,44 +624,107 @@ m_tcpClient.Send(packet.data(), packet.size());
 
 ### 구현 체크리스트
 
+#### A. 데이터 구조
 - [ ] `Protocol.h`에 `PIDGainPacket` 구조체 추가
 - [ ] `UnpackPIDGainPacket()` 함수 구현
+- [ ] CRC-16 체크섬 검증
+
+#### B. PID 관리
 - [ ] `PIDGainManager` 클래스 구현
-- [ ] TCP 수신 처리에 PID 게인 패킷 핸들링 추가
-- [ ] 메인 루프에 에피소드 시작/종료 로직 추가
-- [ ] PID 게인 적용 타이밍 제어
+  - [ ] 기본 PID 하드코딩 (80, 130, 0)
+  - [ ] 현재 PID 변수 (`m_currentKp`, `m_currentKi`, `m_currentKd`)
+  - [ ] 다음 PID 변수 (`m_nextKp`, `m_nextKi`, `m_nextKd`)
+  - [ ] `ReceivePIDGain()`: 수신한 PID를 m_next*에 보관
+  - [ ] `StartEpisode()`: m_next를 m_current로 전환
+  - [ ] `UseDefaultGains()`: 기본 PID 사용 (첫 에피소드)
+  - [ ] 스레드 안전성 (mutex)
+
+#### C. TCP 통신
+- [ ] TCP 수신 처리에 PID 게인 패킷 핸들링 추가 (SOF=0xCCCC)
+- [ ] 상태 패킷 전송 (1kHz, SOF=0xAAAA)
+
+#### D. 메인 제어 루프
+- [ ] 에피소드 카운터 추가
+- [ ] 첫 에피소드: `UseDefaultGains()` 호출
+- [ ] 2번째 이후: `StartEpisode()` 호출 (m_next → m_current)
+- [ ] PID 컨트롤러 적용: `setGains()`
 - [ ] 15초 타이머 구현
 - [ ] learning_done 플래그 처리
-- [ ] 스레드 안전성 보장 (mutex)
-- [ ] 로깅 및 디버깅 메시지 추가
+- [ ] 로깅 및 디버깅 메시지
 
 ### 통신 프로토콜 요약
 
 | 방향 | 패킷 종류 | SOF | 주파수 | 내용 |
 |------|----------|-----|--------|------|
-| RL→Robot | PID Gain | 0xCCCC | 에피소드 시작/종료 시 | Kp, Ki, Kd, episode_done, learning_done |
+| RL→Robot | PID Gain | 0xCCCC | 에피소드 종료 시 (첫 에피소드 제외) | Kp, Ki, Kd, episode_done, learning_done |
 | Robot→RL | State | 0xAAAA | 1kHz | Force, Error, PI output, Sander active |
+
+**중요**: 첫 에피소드는 로봇제어PC가 하드코딩된 기본 PID를 사용하므로 강화학습PC에서 PID를 전송하지 않습니다.
 
 ### 에피소드 타이밍 다이어그램
 
 ```
-에피소드 1:
-  [RL] 시작 시 PID (80,130,0) 전송 → [Robot] 적용
-  [Robot] 15초간 1kHz 데이터 전송 → [RL] 수집
-  [RL] 보상 계산 → 학습 → 다음 PID 계산
-  [RL] 종료 시 다음 PID + episode_done=True 전송 → [Robot] 저장
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+에피소드 1 (기준 성능 측정)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[시작]
+  [Robot] 변수 상태: m_currentKp=80, m_currentKi=130, m_currentKd=0 (하드코딩 초기값)
+  [Robot] PID 컨트롤러 적용: setGains(80, 130, 0)
+  [RL]    PID 전송 안 함 (로봇제어PC 자체 값 사용)
+  
+[실행 - 15초]
+  [Robot] 매 1ms마다: 힘 센서 읽기 → PID 제어 계산 → 상태 패킷 전송 (1kHz)
+  [RL]    매 1ms마다: 상태 패킷 수신 → 힘/PI출력 데이터 저장
+  [RL]    총 15,000개 데이터 포인트 수집 (힘, 에러, PI출력 등)
+  
+[종료]
+  [RL] 15,000개 데이터 분석: RMSE, 오버슈트, 정착시간 등 18개 지표 계산
+  [RL] 보상 계산: 기준 성능 평가
+  [RL] Replay Buffer 저장: transition 1개 추가 (총 1개)
+  [RL] 통계 업데이트: 보상 기록, 성능 지표 로깅
+  [RL] 신경망 학습 시도: 건너뜀 (replay buffer=1개 < 최소 2개)
+  [RL] 에피소드 2용 PID 계산: 초기 Actor 네트워크로 계산 (학습 전 상태)
+  [RL] 패킷 전송: Kp=85.3, Ki=127.8, Kd=2.1, episode_done=True
+  [Robot] 패킷 수신 → m_nextKp=85.3, m_nextKi=127.8, m_nextKd=2.1로 보관
+  
+  ⚠️ 에피소드 2는 초기 네트워크의 PID 사용 (학습 전)
+  
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+에피소드 2 (강화학습 시작)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[시작]
+  [Robot] m_currentKp = m_nextKp (85.3으로 전환)
+  [Robot] m_currentKi = m_nextKi (127.8로 전환)
+  [Robot] m_currentKd = m_nextKd (2.1로 전환)
+  [Robot] PID 컨트롤러 적용: setGains(85.3, 127.8, 2.1)
+  [RL]    PID 전송 안 함 (이미 에피소드 1 종료 시 전송했음)
+  
+[실행 - 15초]
+  [Robot] 매 1ms마다: 힘 센서 읽기 → PID 제어 계산 → 상태 패킷 전송 (1kHz)
+  [RL]    매 1ms마다: 상태 패킷 수신 → 힘/PI출력 데이터 저장
+  [RL]    총 15,000개 데이터 포인트 수집
+  
+[종료]
+  [RL] 15,000개 데이터 분석: 18개 제어 지표 계산
+  [RL] 보상 계산
+  [RL] Replay Buffer 저장: transition 1개 추가 (총 2개)
+  [RL] 통계 업데이트: 보상 기록, 성능 지표 로깅
+  [RL] 신경망 학습: ✅ 시작! (replay buffer=2개, 배치크기 2, 1회 업데이트)
+  [RL] 에피소드 3용 PID 계산: ✅ 학습된 네트워크로 계산! (학습 후)
+  [RL] 패킷 전송: Kp=82.1, Ki=131.5, Kd=1.8, episode_done=True
+  [Robot] 패킷 수신 → m_nextKp=82.1, m_nextKi=131.5, m_nextKd=1.8로 보관
+  
+  ✅ 에피소드 3부터 학습된 네트워크의 PID 사용!
 
-에피소드 2:
-  [Robot] 저장된 PID 적용 (전송 없음)
-  [Robot] 15초간 1kHz 데이터 전송 → [RL] 수집
-  [RL] 보상 계산 → 학습 → 다음 PID 계산
-  [RL] 종료 시 다음 PID + episode_done=True 전송 → [Robot] 저장
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+에피소드 3~500 (반복)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-... (반복)
-
-마지막 에피소드:
-  [RL] 종료 시 learning_done=True 전송
-  [Robot] 학습 완료 확인 → 제어 종료
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+마지막 에피소드 종료
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  [RL] 패킷 전송: Kp=0, Ki=0, Kd=0, learning_done=True
+  [Robot] 학습 완료 플래그 확인 → 제어 루프 종료
 ```
 
 ---
