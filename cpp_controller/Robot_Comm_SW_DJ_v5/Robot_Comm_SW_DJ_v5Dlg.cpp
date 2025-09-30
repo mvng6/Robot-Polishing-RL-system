@@ -1504,7 +1504,8 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 					g_pDlg->m_received_RL_I_Gain.load(),
 					g_pDlg->m_received_RL_D_Gain.load()
 				);
-
+				printf("수신된 PID 게인 = %.3f\t%.3f\t%.3f\n",
+					g_pDlg->m_received_RL_P_Gain.load(), g_pDlg->m_received_RL_I_Gain.load(), g_pDlg->m_received_RL_D_Gain.load());
 				// ====================================
 
 				RL_count = 0;
@@ -1671,8 +1672,6 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 			{
 				if (g_pDlg->m_setting.First_Contact.load() == true)
 				{
-					printf("Control Step = 2\n");
-
 					g_pDlg->m_setting.First_Contact.store(false);
 					g_pDlg->m_setting.vx_mms.store(0.0);					// X축에 대한 이동 방향 & 속도 설정
 

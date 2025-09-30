@@ -1,10 +1,11 @@
-#include "pch.h" // MFC ÇÁ·ÎÁ§Æ®ÀÇ ÇÁ¸®ÄÄÆÄÀÏ Çì´õ
+#include "pch.h" // MFC í”„ë¡œì íŠ¸ì—ì„œ ì‚¬ìš©í•˜ëŠ” í”„ë¦¬ì»´íŒŒì¼ í—¤ë”
 #include "Protocol.h"
-#include <winsock2.h> // htons, ntohs, htonl, ntohl ÇÔ¼ö »ç¿ëÀ» À§ÇØ Ãß°¡
+#include <winsock2.h> // htons, ntohs, htonl, ntohl í•¨ìˆ˜ ì‚¬ìš©ì„ ìœ„í•´ ì¶”ê°€
+#include <cstdint>    // uint32_t íƒ€ì… ì‚¬ìš©ì„ ìœ„í•´ ì¶”ê°€
 
-#pragma comment(lib, "ws2_32.lib") // winsock2 ¶óÀÌºê·¯¸® ¸µÅ©
+#pragma comment(lib, "ws2_32.lib") // winsock2 ë¼ì´ë¸ŒëŸ¬ë¦¬ ë§í¬
 
-// CRC-16 Ã¼Å©¼¶ °è»ê ÇÔ¼ö
+// CRC-16 ì²´í¬ì„¬ ê³„ì‚° í•¨ìˆ˜
 unsigned short calculate_crc16(const unsigned char* data, size_t length)
 {
 	unsigned short crc = 0xFFFF;
@@ -22,21 +23,21 @@ unsigned short calculate_crc16(const unsigned char* data, size_t length)
 	return crc;
 }
 
-// Packing ÇÔ¼ö
+// Packing í•¨ìˆ˜
 std::vector<char> PackRobotStatus(float current_forceZ, float target_forceZ, float error_forceZ, float error_forceZ_dot, float error_forceZ_int,
 	float cur_PID_output, bool Sander_Flag)
 {
 	PythonCommPacket packet;
-	packet.sof = 0xAAAA;									// Start of Frame (2¹ÙÀÌÆ®)
-	packet.RL_currentForceZ = current_forceZ;				// ÇöÀç z¹æÇâ Á¢ÃË·Â (4¹ÙÀÌÆ®)
-	packet.RL_targetForceZ = target_forceZ;					// ¸ñÇ¥ z¹æÇâ Á¢ÃË·Â (4¹ÙÀÌÆ®)
-	packet.RL_forceZError = error_forceZ;					// z¹æÇâ Á¢ÃË·Â ¿ÀÂ÷ (4¹ÙÀÌÆ®)
-	packet.RL_forceZErrordot = error_forceZ_dot;			// z¹æÇâ Á¢ÃË·Â ¿ÀÂ÷ ¹ÌºĞ°ª (4¹ÙÀÌÆ®)
-	packet.RL_forceZErrorintegral = error_forceZ_int;		// z¹æÇâ Á¢ÃË·Â ¿ÀÂ÷ ÀûºĞ°ª (4¹ÙÀÌÆ®)
-	packet.RL_currentPID = cur_PID_output;					// ÇöÀç PID Ãâ·Â°ª (4¹ÙÀÌÆ®)
-	packet.RL_sanderactiveFlag = Sander_Flag;				// Sander È°¼ºÈ­ ÇÃ·¡±× (1¹ÙÀÌÆ®)
+	packet.sof = 0xAAAA;									// Start of Frame (2ë°”ì´íŠ¸)
+	packet.RL_currentForceZ = current_forceZ;				// í˜„ì¬ zë°©í–¥ ì ‘ì´‰ë ¥ (4ë°”ì´íŠ¸)
+	packet.RL_targetForceZ = target_forceZ;					// ëª©í‘œ zë°©í–¥ ì ‘ì´‰ë ¥ (4ë°”ì´íŠ¸)
+	packet.RL_forceZError = error_forceZ;					// zë°©í–¥ ì ‘ì´‰ë ¥ ì˜¤ì°¨ (4ë°”ì´íŠ¸)
+	packet.RL_forceZErrordot = error_forceZ_dot;			// zë°©í–¥ ì ‘ì´‰ë ¥ ì˜¤ì°¨ì˜ ë¯¸ë¶„ê°’ (4ë°”ì´íŠ¸)
+	packet.RL_forceZErrorintegral = error_forceZ_int;		// zë°©í–¥ ì ‘ì´‰ë ¥ ì˜¤ì°¨ì˜ ì ë¶„ê°’ (4ë°”ì´íŠ¸)
+	packet.RL_currentPID = cur_PID_output;					// í˜„ì¬ PID ì¶œë ¥ê°’ (4ë°”ì´íŠ¸)
+	packet.RL_sanderactiveFlag = Sander_Flag;				// Sander í™œì„±í™” í”Œë˜ê·¸ (1ë°”ì´íŠ¸)
 
-	// ¹ÙÀÌÆ® ¼ø¼­ º¯È¯
+	// ë„¤íŠ¸ì›Œí¬ ë°”ì´íŠ¸ ìˆœì„œ ë³€í™˜
 	packet.sof = htons(packet.sof);
 	*(unsigned long*)&packet.RL_currentForceZ = htonl(*(unsigned long*)&packet.RL_currentForceZ);
 	*(unsigned long*)&packet.RL_targetForceZ = htonl(*(unsigned long*)&packet.RL_targetForceZ);
@@ -45,28 +46,28 @@ std::vector<char> PackRobotStatus(float current_forceZ, float target_forceZ, flo
 	*(unsigned long*)&packet.RL_forceZErrorintegral = htonl(*(unsigned long*)&packet.RL_forceZErrorintegral);
 	*(unsigned long*)&packet.RL_currentPID = htonl(*(unsigned long*)&packet.RL_currentPID);
 
-	// Ã¼Å©¼¶ °è»ê ¹× ¼³Á¤
+	// ì²´í¬ì„¬ ê³„ì‚° ë° ì„¤ì •
 	packet.checksum = calculate_crc16((const unsigned char*)&packet, sizeof(packet) - sizeof(unsigned short));
-	packet.checksum = htons(packet.checksum);				// Ã¼Å©¼¶ (2¹ÙÀÌÆ®)
+	packet.checksum = htons(packet.checksum);				// ì²´í¬ì„¬ (2ë°”ì´íŠ¸)
 
-	// ½ÇÁ¦ Àü¼ÛÇÒ µ¥ÀÌÅÍ Å©±â Ãâ·Â (µğ¹ö±ë¿ë)
+	// ë°”ì´íŠ¸ ìŠ¤íŠ¸ë¦¼ìœ¼ë¡œ ë³€í™˜í•˜ì—¬ ë°˜í™˜ (ì†¡ì‹ ìš©)
 	std::vector<char> result(reinterpret_cast<const char*>(&packet),
 		reinterpret_cast<const char*>(&packet) + sizeof(packet));
 
 	return result;
 }
 
-// Unpacking ÇÔ¼ö
+// Unpacking í•¨ìˆ˜
 bool UnpackRLAgentCommand(const char* buffer, int length, RLAgentPacket& outPacket)
 {
 	if (length < sizeof(RLAgentPacket)) {
 		return false;
 	}
 
-	// ¿øº» µ¥ÀÌÅÍ¸¦ º¹»çÇÏ¿© »ç¿ë (¿øº» ¹öÆÛ¸¦ Á÷Á¢ ¼öÁ¤ÇÏÁö ¾Ê±â À§ÇØ)
+	// ìˆ˜ì‹  ë°ì´í„°ë¥¼ êµ¬ì¡°ì²´ë¡œ ë³µì‚¬ (ì²´í¬ì„¬ ê²€ì¦ì„ ìœ„í•´ ì›ë³¸ ë°ì´í„° ë³´ì¡´)
 	RLAgentPacket received_packet = *reinterpret_cast<const RLAgentPacket*>(buffer);
 
-	// 1. Ã¼Å©¼¶ °ËÁõ
+	// 1. ì²´í¬ì„¬ ê²€ì¦
 	unsigned short received_checksum = ntohs(received_packet.checksum);
 	unsigned short calculated_checksum = calculate_crc16(
 		(const unsigned char*)&received_packet,
@@ -75,22 +76,26 @@ bool UnpackRLAgentCommand(const char* buffer, int length, RLAgentPacket& outPack
 
 	if (received_checksum != calculated_checksum) {
 		TRACE("Checksum error in Protocol Unpacking!\n");
-		return false; // Ã¼Å©¼¶ ºÒÀÏÄ¡ ½Ã ½ÇÆĞ
+		return false; // ì²´í¬ì„¬ ë¶ˆì¼ì¹˜ë¡œ ì‹¤íŒ¨
 	}
 
-	// 2. ¹ÙÀÌÆ® ¼ø¼­ º¯È¯ (Network to Host)
+	// 2. ë„¤íŠ¸ì›Œí¬ ë°”ì´íŠ¸ ìˆœì„œ ë³€í™˜ (Network to Host)
 	outPacket.sof = ntohs(received_packet.sof);
 
-	/*float rl_Pressure = received_packet.RL_ResidualP;
+	/* ê¸°ì¡´ ì••ë ¥ ë³´ì •ê°’ ì²˜ë¦¬
+	float rl_Pressure = received_packet.RL_ResidualP;
 	*(unsigned long*)&rl_Pressure = ntohl(*(unsigned long*)&rl_Pressure);
 	outPacket.RL_ResidualP = rl_Pressure;*/
 
+	// PID ê²Œì¸ê°’ë“¤ì˜ ë„¤íŠ¸ì›Œí¬ ë°”ì´íŠ¸ ìˆœì„œ ë³€í™˜ (Network to Host)
 	float rl_gain_P = received_packet.RL_gain_P;
-	*(unsigned long*)&rl_gain_P = ntohl(*(unsigned long*)&rl_gain_P);
+	*(uint32_t*)&rl_gain_P = ntohl(*(uint32_t*)&rl_gain_P);
+	
 	float rl_gain_I = received_packet.RL_gain_I;
-	*(unsigned long*)&rl_gain_I = ntohl(*(unsigned long*)&rl_gain_I);
+	*(uint32_t*)&rl_gain_I = ntohl(*(uint32_t*)&rl_gain_I);
+	
 	float rl_gain_D = received_packet.RL_gain_D;
-	*(unsigned long*)&rl_gain_D = ntohl(*(unsigned long*)&rl_gain_D);
+	*(uint32_t*)&rl_gain_D = ntohl(*(uint32_t*)&rl_gain_D);
 
 	outPacket.RL_gain_P = rl_gain_P;
 	outPacket.RL_gain_I = rl_gain_I;
