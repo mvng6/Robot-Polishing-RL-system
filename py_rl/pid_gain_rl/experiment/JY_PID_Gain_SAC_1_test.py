@@ -129,22 +129,27 @@ class Constants:
     # =========================
     # PID 최적화 보상 관련 상수
     # =========================
-    # PID 최적화 보상 가중치
-    REWARD_WEIGHT_RMSE = 1.0          # RMSE 가중치 - 제어 정확도
-    REWARD_WEIGHT_OVERSHOOT = 0.06    # 오버슈트 가중치 - 과도한 응답 방지
+    # PID 최적화 보상 가중치 (정규화된 지표 기반)
+    REWARD_WEIGHT_BAND = 1.5          # 밴드 유지 비율 가중치 (핵심 지표)
+    REWARD_WEIGHT_RMSE = 1.2          # RMSE 가중치 - 제어 정확도
+    REWARD_WEIGHT_OVERSHOOT = 0.7     # 오버슈트 가중치 - 과도한 응답 방지
     REWARD_WEIGHT_SETTLING = 0.6      # 정착시간 가중치 - 빠른 수렴
-    REWARD_WEIGHT_EFFORT = 0.02       # 제어 노력 가중치 - PID gain 크기
-    REWARD_WEIGHT_VARIANCE = 0.5      # 오차 분산 가중치 - 안정성
-    REWARD_WEIGHT_OUT_OF_BAND = 2.0   # 밴드 이탈 시간 가중치 - 범위 밖 시간
-    REWARD_WEIGHT_BAND = 10.0         # 밴드 유지 가중치 - 목표 범위 유지
+    REWARD_WEIGHT_VARIANCE = 0.4      # 오차 분산 가중치 - 진동성/안정성
+    REWARD_WEIGHT_U_RMS = 0.3         # 제어 노력 가중치 - PI 출력 RMS
+    REWARD_WEIGHT_DU_RMS = 0.3        # 제어 변화율 가중치 - PI 출력 변화율
+    REWARD_WEIGHT_SATURATION = 0.4    # 포화 비율 가중치 - 제어 포화 방지
     
     # 보상 범위
     REWARD_MIN = -100.0               # 최소 보상값 (안전 위반 시)
     REWARD_MAX = 50.0                 # 최대 보상값 (완벽한 제어 시)
     
     # 제어 성능 임계값
-    BAND_TOLERANCE_N = 5.0            # 밴드 허용 오차 (N) - 목표 힘 ±5N 범위
+    BAND_TOLERANCE_N = 0.5            # 밴드 허용 오차 (N) - 논문 스펙: ±0.5N
+    SETTLING_BAND_TOLERANCE = 0.5     # 정착 판정 허용 오차 (N) - ±0.5N 또는 ±1%
+    SETTLING_HOLD_TIME_S = 1.0        # 정착 판정 유지 시간 (초) - 1초 연속 유지
     SAFETY_FORCE_LIMIT = 100.0        # 안전 힘 제한 (N)
+    PI_OUTPUT_MAX = 0.4               # PI 출력 최대값 (MPa) - 시스템 한계
+    PI_OUTPUT_SAT_THRESHOLD = 0.95    # 포화 판정 임계값 (95% 이상)
 
 # =========================
 # PID GAIN 최적화 설정
@@ -215,7 +220,7 @@ def scale_action_to_pid(action, pid_range):
         pid_gains: 실제 PID gain 값들 [Kp, Ki, Kd]
     """
     def scale_single(v, lo, hi):
-        return lo + (v + 1.0) * 0.5 * (hi - lo)
+        return lo + (v + 1.0) * 0.5 * (hi - lo) # 정규화된 값을 실제 범위로 변환하는 함수 [lo(최솟값), hi(최댓값)]
     
     return np.array([
         scale_single(action[0], *pid_range["Kp"]),
@@ -286,9 +291,6 @@ def create_initial_state(force_data, target_force=45.0, previous_pid_gains=None,
     # error_int는 간단한 누적 (실제로는 더 정교한 계산 필요)
     error_int = float(np.sum(np.abs(all_errors)) * 0.001)  # 1kHz 기준
     
-    # 실제 데이터 사용 로그
-    # print(f"✅ [실제 데이터] Force={current_force:.2f}N, Error={error:.2f}N, DataPoints={len(force_data)}")  # 간소화
-    
     # 이전 에피소드 히스토리 분석 (실제 데이터가 있을 때)
     performance_trend = 0.0
     avg_recent_performance = 0.0
@@ -353,9 +355,6 @@ def _estimate_state_from_previous_pid(previous_pid_gains, target_force, historic
             pid_changes = np.array(recent_pids[-1]) - np.array(recent_pids[-2])
         else:
             pid_changes = np.array([0.0, 0.0, 0.0])
-        
-        # print(f"📊 [성능 분석] 최근 5개 에피소드 성능: {avg_recent_performance:.2f}, 트렌드: {performance_trend:+.2f}")  # 간소화
-        # print(f"📈 [PID 변화] 최근 5개 에피소드: Kp: {pid_changes[0]:+.2f}, Ki: {pid_changes[1]:+.2f}, Kd: {pid_changes[2]:+.2f}")  # 간소화
         
         # PID 변화 분산 계산
         pid_variance = np.var(pid_changes)
@@ -863,11 +862,13 @@ class PIDGainCommunicator:
         
     def send_pid_once(self, kp, ki, kd, timing_accurate=True, episode_done=False, learning_done=False):
         """
-        PID gain을 한 번만 전송 (에피소드 시작 시)
+        PID gain 전송
+        - 첫 에피소드: 에피소드 시작 시 전송
+        - 이후 에피소드: 이전 에피소드 종료 시 다음 에피소드 PID를 미리 전송
         Args:
             kp, ki, kd: PID gain 값들
             timing_accurate: 타이밍 정확성
-            episode_done: 에피소드 종료 플래그
+            episode_done: 에피소드 종료 플래그 (True면 다음 에피소드 PID 포함)
             learning_done: 학습 종료 플래그
         """
         try:
@@ -984,6 +985,7 @@ class PIDGainOptimizationEnvironment:
         
         # ==== ADDED: PID gain 최적화용 변수들 ====
         self.episode_force_data = []  # 에피소드 동안 힘 데이터 수집
+        self.episode_pi_output_data = []  # 에피소드 동안 PI 출력 데이터 수집
         self.episode_start_time = None
         self.current_pid_gains = None  # 현재 사용 중인 PID gain
         
@@ -999,12 +1001,14 @@ class PIDGainOptimizationEnvironment:
     def _log(self, level, message):
         Logger.log(level, message)
     
-    def calculate_episode_reward(self, force_data, target_force=45.0):
+    def calculate_episode_reward(self, force_data, pi_output_data, target_force=45.0, episode_len_s=15.0):
         """
-        에피소드 총보상 계산 (PID gain 최적화용)
+        개선된 에피소드 총보상 계산 (정규화 및 주파수 독립적)
         Args:
             force_data: 에피소드 동안의 힘 데이터 리스트
+            pi_output_data: 에피소드 동안의 PI 출력 데이터 리스트
             target_force: 목표 힘 (기본 45N)
+            episode_len_s: 에피소드 길이 (초)
         Returns:
             total_reward: 에피소드 총보상
             metrics: 성능 지표 딕셔너리
@@ -1012,107 +1016,165 @@ class PIDGainOptimizationEnvironment:
         if not force_data:
             return -100.0, {}
         
-        force_array = np.array(force_data)
+        # 데이터 변환
+        force_array = np.array(force_data, dtype=np.float64)
         errors = force_array - target_force
         abs_errors = np.abs(errors)
         
-        # 1. RMSE (Root Mean Square Error) - 제어 정확도
-        rmse = np.sqrt(np.mean(abs_errors**2))
+        # 샘플링 주파수 계산
+        n_samples = len(force_array)
+        fs_hz = n_samples / episode_len_s
+        dt = 1.0 / fs_hz
         
-        # 2. 오버슈트 계산 (스텝 크기 Δ 기준)
-        F0 = force_array[0] if len(force_array) > 0 else target_force
-        Delta = max(1.0, abs(target_force - F0))  # 스텝 크기 (최소 1N 보장)
+        # ========================================
+        # 1. 핵심 성능 지표 (정규화)
+        # ========================================
+        
+        # 1.1 RMSE (정규화: 0~1)
+        rmse = np.sqrt(np.mean(errors**2))
+        rmse_n = np.clip(rmse / max(target_force, 1.0), 0.0, 1.0)
+        
+        # 1.2 오버슈트 (표준 %OS, 정규화: 0~1)
         max_force = np.max(force_array)
-        overshoot = max(0, (max_force - target_force) / Delta * 100) if max_force > target_force else 0
+        overshoot_pct = max(0.0, (max_force - target_force) / max(target_force, 1.0))
+        overshoot_n = np.clip(overshoot_pct, 0.0, 1.0)
         
-        # 3. 정착시간 계산 (연속 유지 기준) - 1kHz 기준
-        band = 0.05 * target_force  # ±5% 밴드
-        within = np.abs(force_array - target_force) <= band
-        hold_duration = int(2.0 * 1000)  # 2초 연속 유지 (1kHz 기준)
+        # 1.3 밴드 유지 비율 (±0.5N 기준, 정규화: 0~1)
+        tol_main = Constants.BAND_TOLERANCE_N  # 0.5N
+        in_band_main = np.abs(errors) <= tol_main
+        band_ratio = np.sum(in_band_main) * dt / episode_len_s
         
-        # 연속 유지 구간 찾기
+        # 1.4 정착시간 (1초 연속 유지 기준, 정규화: 0~1)
+        tol_settling = max(Constants.SETTLING_BAND_TOLERANCE, 0.01 * target_force)  # max(0.5N, 1%)
+        hold_samples = int(fs_hz * Constants.SETTLING_HOLD_TIME_S)  # 1초
+        in_settling_band = np.abs(errors) <= tol_settling
+        
+        settling_time_s = episode_len_s  # 기본값: 실패
         run_length = 0
-        settling_time = 15.0  # 기본값: 전체 시간
-        for k, in_band in enumerate(within):
-            if in_band:
+        for k, ok in enumerate(in_settling_band):
+            if ok:
                 run_length += 1
-                if run_length >= hold_duration:
-                    settling_time = max(0.0, (k - hold_duration) / 1000.0)
+                if run_length >= hold_samples:
+                    settling_time_s = max(0.0, (k - hold_samples) * dt)
                     break
             else:
                 run_length = 0
         
-        # 4. 제어 노력 (실제 제어 입력 RMS) - 로거와 동일한 정의
-        if hasattr(self.cplogger, 'pi_output_data') and len(self.cplogger.pi_output_data) > 0:
-            control_effort = float(np.sqrt(np.mean(np.square(np.array(self.cplogger.pi_output_data)))))
-        else:
-            control_effort = 0.0
+        settling_n = settling_time_s / episode_len_s
         
-        # 5. 오차 분산 (안정성)
+        # 1.5 오차 분산 (정규화: 진동성 지표)
         error_variance = np.var(errors)
+        variance_n = np.clip(error_variance / (target_force**2), 0.0, 1.0)
         
-        # 6. 밴드 이탈 시간 (목표 범위 밖 체류 시간) - 1kHz 기준
-        out_of_range = abs_errors > 1.0  # ±1N 범위
-        out_of_band_time = np.sum(out_of_range) / 1000.0  # 1kHz 기준
+        # ========================================
+        # 2. 제어 신호 품질 지표 (정규화)
+        # ========================================
         
-        # 7. 밴드 유지 시간 (목표 ±1N 범위 내 유지) - 1kHz 기준
-        in_band = abs_errors <= 1.0
-        band_time = np.sum(in_band) / 1000.0  # 1kHz 기준
+        u_rms_n = 0.0
+        du_rms_n = 0.0
+        sat_ratio = 0.0
         
-        # 이상적인 성능 조건 체크 (사용자 요구사항)
+        if pi_output_data and len(pi_output_data) > 0:
+            u_array = np.array(pi_output_data, dtype=np.float64)
+            u_max = Constants.PI_OUTPUT_MAX  # 0.4 MPa
+            
+            # 2.1 제어 노력 (RMS, 정규화: 0~1)
+            u_rms = np.sqrt(np.mean(u_array**2))
+            u_rms_n = np.clip(u_rms / u_max, 0.0, 1.0)
+            
+            # 2.2 제어 변화율 (RMS, 정규화: 0~1)
+            if len(u_array) > 1:
+                du = np.diff(u_array) / dt
+                du_rms = np.sqrt(np.mean(du**2))
+                du_rms_n = np.clip(du_rms / (u_max / dt), 0.0, 1.0)
+            
+            # 2.3 포화 비율 (정규화: 0~1)
+            sat_threshold = Constants.PI_OUTPUT_SAT_THRESHOLD * u_max  # 95%
+            sat_ratio = np.mean(np.abs(u_array) >= sat_threshold)
+        
+        # ========================================
+        # 3. 보상 계산 (연속형, 정규화된 항목 기반)
+        # ========================================
+        
+        reward = (
+            +Constants.REWARD_WEIGHT_BAND * band_ratio           # 밴드 유지 (높을수록 좋음)
+            -Constants.REWARD_WEIGHT_RMSE * rmse_n               # RMSE 페널티
+            -Constants.REWARD_WEIGHT_OVERSHOOT * overshoot_n     # 오버슈트 페널티
+            -Constants.REWARD_WEIGHT_SETTLING * settling_n       # 정착시간 페널티
+            -Constants.REWARD_WEIGHT_VARIANCE * variance_n       # 진동성 페널티
+            -Constants.REWARD_WEIGHT_U_RMS * u_rms_n             # 제어 노력 페널티
+            -Constants.REWARD_WEIGHT_DU_RMS * du_rms_n           # 제어 변화율 페널티
+            -Constants.REWARD_WEIGHT_SATURATION * sat_ratio      # 포화 페널티
+        )
+        
+        # ========================================
+        # 4. 이상적 성능 보너스 (축소, 연속형)
+        # ========================================
+        
+        ideal_bonus = 0.0
         ideal_conditions = {
-            'fast_response': settling_time <= 1.0,           # 매우 빠른 응답: 1초 이내 정착
-            'no_overshoot': overshoot <= 1.0,                # 오버슈트 없음: 1% 이하
-            'precise_control': rmse <= 0.3,                  # 정밀 제어: RMSE 0.3N 이하
-            'stable_band': band_time >= 12.0,                # 안정적 밴드 유지: 12초 이상 ±1N 유지
-            'low_effort': control_effort <= 0.2,             # 낮은 제어 노력: PI 출력 RMS 0.2 이하
-            'no_saturation': out_of_band_time <= 0.5         # 밴드 이탈 없음: 0.5초 이하
+            'high_band_ratio': band_ratio >= 0.8,          # 80% 이상 밴드 유지
+            'low_rmse': rmse_n <= 0.02,                    # RMSE 매우 낮음
+            'low_overshoot': overshoot_n <= 0.02,          # 오버슈트 거의 없음
+            'fast_settling': settling_time_s <= 1.2,       # 1.2초 이내 정착
+            'low_variance': variance_n <= 0.01,            # 진동 거의 없음
+            'no_saturation': sat_ratio <= 0.05             # 포화 5% 이하
         }
         
-        # 이상적인 성능 달성 시 보상 (스케일 조정)
-        ideal_bonus = 0.0
         ideal_count = sum(ideal_conditions.values())
         
         if ideal_count >= 6:  # 모든 조건 달성
-            ideal_bonus = 20.0  # "이게 정답이야!" 보상 (스케일 조정)
-            print("🎉 [이상적 성능] 모든 조건 달성! +20 보상")
+            ideal_bonus = 3.0
+            print("🎉 [완벽한 성능] 모든 조건 달성! +3 보너스")
         elif ideal_count >= 4:  # 대부분 조건 달성
-            ideal_bonus = 10.0
-            # print("✨ [우수한 성능] 대부분 조건 달성! +10 보상")  # 간소화
+            ideal_bonus = 2.0
         elif ideal_count >= 2:  # 일부 조건 달성
-            ideal_bonus = 5.0
-            # print("👍 [양호한 성능] 일부 조건 달성! +5 보상")  # 간소화
+            ideal_bonus = 1.0
         
-        # 기본 보상 계산
-        reward = (
-            -Constants.REWARD_WEIGHT_RMSE * rmse +                    # RMSE 페널티
-            -Constants.REWARD_WEIGHT_OVERSHOOT * overshoot +          # 오버슈트 페널티
-            -Constants.REWARD_WEIGHT_SETTLING * settling_time +       # 정착시간 페널티
-            -Constants.REWARD_WEIGHT_EFFORT * control_effort +        # 제어 노력 페널티
-            -Constants.REWARD_WEIGHT_VARIANCE * error_variance +      # 오차 분산 페널티
-            -Constants.REWARD_WEIGHT_OUT_OF_BAND * out_of_band_time +   # 밴드 이탈 시간 페널티
-            +Constants.REWARD_WEIGHT_BAND * (1.0 if band_time >= 10.0 else band_time / 10.0)  # 밴드 유지 보상
-        )
-        
-        # 이상적 성능 보너스 추가
         reward += ideal_bonus
         
-        # 안전 위반 페널티
-        if np.max(force_array) > Constants.SAFETY_FORCE_LIMIT:
-            reward += Constants.REWARD_MIN
+        # ========================================
+        # 5. 안전 위반 페널티
+        # ========================================
         
+        if max_force > Constants.SAFETY_FORCE_LIMIT:
+            reward += Constants.REWARD_MIN
+            print(f"⚠️ [안전 위반] 최대 힘: {max_force:.1f}N > {Constants.SAFETY_FORCE_LIMIT}N")
+        
+        # ========================================
+        # 6. 메트릭 딕셔너리 (로깅용)
+        # ========================================
+        
+        # 기존 호환성을 위한 비정규화 값들
         metrics = {
-            'rmse': rmse,
-            'overshoot': overshoot,
-            'settling_time': settling_time,
-            'control_effort': control_effort,
-            'error_variance': error_variance,
-            'out_of_band_time': out_of_band_time,
-            'band_time': band_time,
-            'ideal_bonus': ideal_bonus,
+            # 기본 지표 (기존 호환)
+            'rmse': float(rmse),
+            'overshoot': float(overshoot_pct * 100),  # % 단위
+            'settling_time': float(settling_time_s),
+            'band_time': float(band_ratio * episode_len_s),
+            'out_of_band_time': float((1.0 - band_ratio) * episode_len_s),
+            
+            # 정규화된 지표 (새로 추가)
+            'rmse_n': float(rmse_n),
+            'overshoot_n': float(overshoot_n),
+            'settling_n': float(settling_n),
+            'band_ratio': float(band_ratio),
+            'variance_n': float(variance_n),
+            
+            # 제어 신호 품질 (새로 추가)
+            'u_rms': float(u_rms_n * Constants.PI_OUTPUT_MAX) if pi_output_data else 0.0,
+            'u_rms_n': float(u_rms_n),
+            'du_rms_n': float(du_rms_n),
+            'sat_ratio': float(sat_ratio),
+            
+            # 이상 조건
             'ideal_count': ideal_count,
-            'ideal_conditions': ideal_conditions,
-            'total_reward': reward
+            'ideal_bonus': float(ideal_bonus),
+            
+            # 기타
+            'max_force': float(max_force),
+            'sampling_freq_hz': float(fs_hz),
+            'n_samples': n_samples
         }
         
         return reward, metrics
@@ -1180,6 +1242,7 @@ class PIDGainOptimizationEnvironment:
     def reset_episode(self):
         """에피소드 리셋 (PID gain 최적화용)"""
         self.episode_force_data = []
+        self.episode_pi_output_data = []
         self.episode_start_time = None
         self.current_pid_gains = None
         self.last_log_time = None
@@ -1270,23 +1333,24 @@ class PIDGainOptimizationEnvironment:
                 pid_gains = np.array([80.0, 130.0, 0.0], dtype=np.float32)
                 print(f"🎯 [첫 에피소드] 기준 PID 사용: Kp={pid_gains[0]:.0f}, Ki={pid_gains[1]:.0f}, Kd={pid_gains[2]:.0f}")
                 self._log("INFO", f"🎯 기준 PID: Kp={pid_gains[0]:.0f}, Ki={pid_gains[1]:.0f}, Kd={pid_gains[2]:.0f}")
+                
+                # 첫 에피소드만 시작 시 PID gain 전송
+                print(f"📤 [전송] 첫 에피소드 PID gain 전송 중...")
+                success = self.comm.send_pid_once(
+                    pid_gains[0], pid_gains[1], pid_gains[2], 
+                    timing_accurate=True, episode_done=False, learning_done=False
+                )
+                if not success:
+                    print("❌ [오류] PID gain 전송 실패")
+                    self._log("ERROR", "PID gain 전송 실패")
+                    continue
             else:
                 # 2번째 에피소드부터: 강화학습으로 PID gain 선택 (이전 에피소드 성능 참고)
                 pid_gains, _ = self.agent.select_action(initial_state, evaluate=False)
                 print(f"🤖 [RL] 강화학습 PID 선택: Kp={pid_gains[0]:.2f}, Ki={pid_gains[1]:.2f}, Kd={pid_gains[2]:.2f}")
                 self._log("INFO", f"🤖 RL PID: Kp={pid_gains[0]:.2f}, Ki={pid_gains[1]:.2f}, Kd={pid_gains[2]:.2f}")
-            
-            # 3. PID gain 전송 (한 번만)
-            print(f"📤 [전송] PID gain 전송 중...")
-            success = self.comm.send_pid_once(
-                pid_gains[0], pid_gains[1], pid_gains[2], 
-                timing_accurate=True, episode_done=False, learning_done=False
-            )
-            if not success:
-                print("❌ [오류] PID gain 전송 실패")
-                self._log("ERROR", "PID gain 전송 실패")
-                continue
-            # print("✅ [전송] PID gain 전송 완료")  # 간소화
+                print(f"ℹ️  [정보] 이전 에피소드 종료 시 이미 전송된 PID 사용")
+                # 2번째 에피소드부터는 이전 에피소드 종료 시 이미 전송했으므로 여기서는 전송하지 않음
             
             # 4. PID gain 적용 대기 (새로운 PID gain이 적용될 때까지)
             print("⏳ [대기] PID gain 적용 대기 중... (100ms)")
@@ -1308,6 +1372,7 @@ class PIDGainOptimizationEnvironment:
             
             # 6. 15초 동안 1kHz 데이터 수집
             self.episode_force_data = []
+            self.episode_pi_output_data = []
             self.episode_start_time = time.perf_counter()
             self.current_pid_gains = pid_gains.copy()
             
@@ -1329,6 +1394,7 @@ class PIDGainOptimizationEnvironment:
                     continue
                 
                 self.episode_force_data.append(state[0])  # 힘 데이터 수집
+                self.episode_pi_output_data.append(state[5])  # PI 출력 데이터 수집
                 data_count += 1
                 
                 # 실시간 제어 지표 데이터 수집
@@ -1365,7 +1431,10 @@ class PIDGainOptimizationEnvironment:
             # 5. 에피소드 총보상 계산
             print(f"🧮 [계산] 에피소드 보상 계산 중...")
             episode_reward, metrics = self.calculate_episode_reward(
-                self.episode_force_data, self.cfg['TARGET_FORCE']
+                self.episode_force_data, 
+                self.episode_pi_output_data,
+                self.cfg['TARGET_FORCE'],
+                self.cfg['EPISODE_SECONDS']
             )
             print(f"🏆 [결과] 보상: {episode_reward:.2f}, RMSE: {metrics['rmse']:.2f}, 오버슈트: {metrics['overshoot']:.1f}%")
             
@@ -1463,7 +1532,37 @@ class PIDGainOptimizationEnvironment:
             self.cplogger.save_episode_metrics(ep + 1)
             self.cplogger.reset_episode_data()
             
-            # 12. 에피소드 완료
+            # 12. 다음 에피소드 PID 게인 미리 계산 (마지막 에피소드가 아닌 경우)
+            if ep < episodes - 1:
+                # 다음 에피소드를 위한 초기 상태 생성
+                next_initial_state = create_initial_state(
+                    [], 
+                    self.cfg['TARGET_FORCE'], 
+                    self.previous_pid_gains, 
+                    self.historical_errors,
+                    self.episode_history
+                )
+                # 다음 에피소드 PID 게인 선택
+                next_pid_gains, _ = self.agent.select_action(next_initial_state, evaluate=False)
+                print(f"🎯 [다음 에피소드] PID 미리 계산: Kp={next_pid_gains[0]:.2f}, Ki={next_pid_gains[1]:.2f}, Kd={next_pid_gains[2]:.2f}")
+                self._log("INFO", f"🎯 다음 에피소드 PID: Kp={next_pid_gains[0]:.2f}, Ki={next_pid_gains[1]:.2f}, Kd={next_pid_gains[2]:.2f}")
+            else:
+                # 마지막 에피소드인 경우 현재 PID 사용
+                next_pid_gains = pid_gains
+            
+            # 13. 에피소드 완료 신호 전송 (다음 에피소드 PID 게인과 함께)
+            print(f"📤 [전송] 에피소드 {ep+1} 완료 신호 + 다음 PID 전송 중...")
+            episode_done_success = self.comm.send_pid_once(
+                next_pid_gains[0], next_pid_gains[1], next_pid_gains[2], 
+                timing_accurate=True, episode_done=True, learning_done=False
+            )
+            if episode_done_success:
+                print(f"✅ [전송] 에피소드 {ep+1} 완료 신호 + 다음 PID 전송 성공")
+                self._log("INFO", f"📤 에피소드 {ep+1} 완료 신호 + 다음 PID 전송 성공")
+            else:
+                print(f"❌ [오류] 에피소드 {ep+1} 완료 신호 + 다음 PID 전송 실패")
+                self._log("ERROR", f"에피소드 {ep+1} 완료 신호 + 다음 PID 전송 실패")
+            
             print(f"✅ [완료] 에피소드 {ep+1} 완료! 다음 에피소드 준비 중...")
             print("=" * 80)
             
@@ -1492,7 +1591,14 @@ class PIDGainOptimizationEnvironment:
         DataSaver.save_all_data(self, episodes, force=True)
         
         # 15. 학습 완료 신호 전송
-        self.comm.send_pid_once(0, 0, 0, True, False, True)  # learning_done=True
+        print(f"📤 [전송] 모든 에피소드 완료 - 학습 종료 신호 전송 중...")
+        learning_done_success = self.comm.send_pid_once(0, 0, 0, True, False, True)  # learning_done=True
+        if learning_done_success:
+            print(f"✅ [전송] 학습 종료 신호 전송 성공")
+            self._log("INFO", "📤 학습 종료 신호 전송 성공")
+        else:
+            print(f"❌ [오류] 학습 종료 신호 전송 실패")
+            self._log("ERROR", "학습 종료 신호 전송 실패")
         self.comm.close()
 
 # =========================
@@ -2678,17 +2784,21 @@ if __name__ == "__main__":
         except Exception as e:
             Logger.log("ERROR", f"❌ 데이터 저장 실패: {e}")
     except KeyboardInterrupt:
-        Logger.log("WARNING", "Interrupted by user.")
+        Logger.log("WARNING", "Interrupted by user (Ctrl+C).")
+        print("\n⚠️ 사용자가 Ctrl+C로 중단했습니다. 안전하게 종료 중...")
         # ==== ADDED: KeyboardInterrupt 시 learning_done=True 전송 ====
         try:
             print("📡 강화학습 중단 신호 전송 중...")
             success = env.comm.send_pid_once(0.0, 0.0, 0.0, True, False, True)  # learning_done=True
             if success:
                 print("✅ 강화학습 중단 신호 전송 성공")
+                Logger.log("INFO", "📤 학습 중단 신호 전송 성공")
             else:
                 print("⚠️ 강화학습 중단 신호 전송 실패")
+                Logger.log("ERROR", "학습 중단 신호 전송 실패")
         except Exception as e:
             print(f"⚠️ 강화학습 중단 신호 전송 오류: {e}")
+            Logger.log("ERROR", f"학습 중단 신호 전송 오류: {e}")
         
         # ==== ADDED: 모든 데이터 저장 ====
         DataSaver.save_all_data(env)
@@ -2696,16 +2806,20 @@ if __name__ == "__main__":
         env.comm.close()
     except Exception as e:
         print(f"\n❌ Training failed with error: {e}")
+        Logger.log("ERROR", f"학습 중 오류 발생: {e}")
         # ==== ADDED: 예외 발생 시 learning_done=True 전송 ====
         try:
             print("📡 강화학습 오류 종료 신호 전송 중...")
             success = env.comm.send_pid_once(0.0, 0.0, 0.0, True, False, True)  # learning_done=True
             if success:
                 print("✅ 강화학습 오류 종료 신호 전송 성공")
+                Logger.log("INFO", "📤 학습 오류 종료 신호 전송 성공")
             else:
                 print("⚠️ 강화학습 오류 종료 신호 전송 실패")
+                Logger.log("ERROR", "학습 오류 종료 신호 전송 실패")
         except Exception as e2:
             print(f"⚠️ 강화학습 오류 종료 신호 전송 오류: {e2}")
+            Logger.log("ERROR", f"학습 오류 종료 신호 전송 오류: {e2}")
         
         # ==== ADDED: 모든 데이터 저장 ====
         DataSaver.save_all_data(env)
