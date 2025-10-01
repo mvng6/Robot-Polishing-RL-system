@@ -55,14 +55,7 @@ class DataSaver:
         except Exception as e:
             Logger.log("ERROR", f"제어 성능 지표 저장 실패: {e}")
         
-        # Learning Done 폴더에 파일들 복사
-        try:
-            Logger.log("INFO", "📁 Learning Done 폴더에 파일들 복사 중...")
-            env.ldlogger.copy_episode_rewards(env.agent.episode_rewards, env.rlogger.log_dir)
-            env.ldlogger.copy_reward_breakdown(env.rlogger.log_dir)
-            Logger.log("INFO", "✅ Learning Done 폴더 복사 완료!")
-        except Exception as e:
-            Logger.log("ERROR", f"Learning Done 폴더 복사 실패: {e}")
+        # 이미 learning_done 폴더 안에 생성되므로 복사 불필요
         
         Logger.log("INFO", "✅ 데이터 저장 완료!")
 
@@ -243,7 +236,7 @@ def create_initial_state(force_data, target_force=45.0, previous_pid_gains=None,
     if not force_data:
         if previous_pid_gains is not None:
             # 이전 PID gain으로 추정된 상태 사용
-            print(f"⚠️  [데이터 없음] 이전 에피소드 PID 사용: Kp={previous_pid_gains[0]:.2f}, Ki={previous_pid_gains[1]:.2f}, Kd={previous_pid_gains[2]:.2f}")
+            # 이전 에피소드 PID로 상태 추정
             return _estimate_state_from_previous_pid(previous_pid_gains, target_force, historical_errors, episode_history)
         else:
             # 첫 에피소드인 경우 기본값
@@ -697,7 +690,7 @@ class PIDGainCommunicator:
         # PID gain 전송용 패킷 포맷
         self.PID_PACKET_FORMAT = ">HfffBBBH"  # SOF, Kp, Ki, Kd, timing_accurate, episode_done, learning_done, checksum
         self.PID_PACKET_SIZE = 19  # SOF(2) + Kp(4) + Ki(4) + Kd(4) + timing(1) + ep_done(1) + learn_done(1) + checksum(2) = 19 bytes
-        self.PID_SOF = 0xCCCC
+        self.PID_SOF = 0xBBBB  # 잔차학습과 동일한 SOF 사용
         self.latest_state = None
         self.latest_sander_active = False
         self.receive_thread = None
@@ -904,9 +897,9 @@ class PIDGainCommunicator:
         
     def send_reset(self):
         try:
-            reset_data = struct.pack(">HBxxxH", 0xCCCC, 1, 0)
+            reset_data = struct.pack(">HBxxxH", 0xBBBB, 1, 0)
             checksum = self.calculate_crc16(reset_data[:-2])
-            reset_packet = struct.pack(">HBxxxH", 0xCCCC, 1, checksum)
+            reset_packet = struct.pack(">HBxxxH", 0xBBBB, 1, checksum)
             self.conn.sendall(reset_packet)
             return True
         except Exception as e:
@@ -977,14 +970,13 @@ class PIDGainOptimizationEnvironment:
         self.band_tol_N = Constants.BAND_TOLERANCE_N
         self.safety_force_limit = Constants.SAFETY_FORCE_LIMIT
 
-        # ==== ADDED: reward breakdown logger ====
-        self.rlogger = RewardBreakdownLogger(self.cfg["LOG_DIR"])
-        
-        # ==== ADDED: control performance logger ====
-        self.cplogger = ControlPerformanceLogger(self.cfg["LOG_DIR"])
-        
-        # ==== ADDED: learning done logger ====
+        # ==== 로깅 폴더 구조: learning_done_{timestamp}/ 한 곳에 모두 ====
+        # 1. LearningDoneLogger가 learning_done 폴더 생성
         self.ldlogger = LearningDoneLogger(self.cfg["LOG_DIR"])
+        
+        # 2. 나머지 Logger들은 learning_done 폴더 안에 서브폴더 생성
+        self.cplogger = ControlPerformanceLogger(self.ldlogger.log_dir)
+        self.rlogger = RewardBreakdownLogger(self.ldlogger.log_dir)
         
         # ==== ADDED: PID gain 최적화용 변수들 ====
         self.episode_force_data = []  # 에피소드 동안 힘 데이터 수집
@@ -1277,12 +1269,6 @@ class PIDGainOptimizationEnvironment:
         model_save_dir = self.cfg["MODEL_SAVE_DIR"]
         os.makedirs(model_save_dir, exist_ok=True)
         
-        self._log("INFO", "🚀 PID Gain 최적화 강화학습 시작")
-        self._log("INFO", f"🎯 목표 힘: {self.cfg['TARGET_FORCE']}N 고정")
-        self._log("INFO", f"⏱️ 에피소드 길이: {self.cfg['EPISODE_SECONDS']}초")
-        self._log("INFO", f"📡 수신: 1kHz 상태 수신, 에피소드당 1회 PID 전송")
-        self._log("INFO", f"📁 모델 저장: {model_save_dir}")
-        
         # RL 활성화 대기
         self._log("INFO", "🔄 RL 활성화 대기 중...")
         wait_start = time.perf_counter()
@@ -1290,14 +1276,16 @@ class PIDGainOptimizationEnvironment:
             state, sander_active = self.comm.get_latest_state()
             if sander_active:
                 wait_duration = time.perf_counter() - wait_start
-                self._log("INFO", f"🎯 RL 활성화! ({wait_duration:.1f}s 대기)")
+                print(f"\r{' ' * 80}\r🎯 RL 활성화! ({wait_duration:.1f}s 대기)")
+                self._log("INFO", f"RL 활성화 ({wait_duration:.1f}s)")
                 break
             if state is not None:
                 current_force = state[0]
-                self._log("INFO", f"⏳ 대기 중... Current Force: {current_force:.1f}N")
+                print(f"\r⏳ 대기 중 Force:{current_force:6.1f}N", end='', flush=True)
             time.sleep(1.0)
             if time.perf_counter() - wait_start > 300:
-                self._log("WARNING", "⚠️ RL 활성화 타임아웃 (5분)")
+                print()
+                self._log("WARNING", "RL 활성화 타임아웃 (5분)")
                 return
         
         episode_stats = []
@@ -1306,13 +1294,10 @@ class PIDGainOptimizationEnvironment:
         
         for ep in range(episodes):
             self.episode_count = ep
-            self._log("INFO", f"\n🎬 === 에피소드 {ep+1}/{episodes} 시작 ===")
-            
-            # 1. 이전 에피소드 정보로 초기 상태 추정
-            print(f"\n🔍 [에피소드 {ep+1}] 시작")
+            print(f"\n{'='*60}\n에피소드 {ep+1}/{episodes}")
             if ep > 0 and self.previous_pid_gains is not None:
                 # 이전 에피소드 정보를 활용한 상태 추정
-                print(f"📊 이전 에피소드 PID 정보 활용: {self.previous_pid_gains}")
+                
                 initial_state = create_initial_state(
                     [], 
                     self.cfg['TARGET_FORCE'], 
@@ -1331,32 +1316,33 @@ class PIDGainOptimizationEnvironment:
                     []
                 )
             
-            # 2. PID gain 사용 (실제로 로봇에 적용된 PID)
+            # 2. PID gain 사용 및 에피소드 시작 신호 전송
             if ep == 0:
                 # 첫 에피소드: 로봇제어PC 자체 PID 사용 (P=80, I=130, D=0)
                 pid_gains = np.array([80.0, 130.0, 0.0], dtype=np.float32)
                 print(f"🎯 [에피소드 1] 로봇제어PC 자체 PID 사용: Kp={pid_gains[0]:.0f}, Ki={pid_gains[1]:.0f}, Kd={pid_gains[2]:.0f}")
-                print(f"ℹ️  [정보] PID 전송 안 함 (로봇제어PC 하드코딩 사용)")
                 self._log("INFO", f"🎯 에피소드 1 기준 PID: Kp={pid_gains[0]:.0f}, Ki={pid_gains[1]:.0f}, Kd={pid_gains[2]:.0f}")
             else:
                 # 2번째 에피소드부터: 이전 에피소드 종료 시 전송한 PID 사용
                 assert self.pid_gains_next is not None, f"에피소드 {ep+1}: 이전 에피소드에서 next PID가 설정되지 않았습니다!"
-                pid_gains = self.pid_gains_next.copy()  # ✅ 실제로 로봇에 적용된 PID 사용!
-                print(f"🤖 [에피소드 {ep+1}] 이전 에피소드에서 전송한 PID 사용: Kp={pid_gains[0]:.2f}, Ki={pid_gains[1]:.2f}, Kd={pid_gains[2]:.2f}")
-                self._log("INFO", f"🤖 에피소드 {ep+1} PID: Kp={pid_gains[0]:.2f}, Ki={pid_gains[1]:.2f}, Kd={pid_gains[2]:.2f}")
-                print(f"ℹ️  [정보] 이 PID가 로그/보상/학습에 모두 사용됨 (일관성 보장)")
+                pid_gains = self.pid_gains_next.copy()
+                print(f"🤖 [에피소드 {ep+1}] PID: Kp={pid_gains[0]:.2f}, Ki={pid_gains[1]:.2f}, Kd={pid_gains[2]:.2f}")
+                
+                # ⭐ 에피소드 시작 신호: episode_done=False 전송 (플래그 리셋)
+                print(f"📤 에피소드 시작 신호 전송 (episode_done=False)")
+                self.comm.send_pid_once(
+                    pid_gains[0], pid_gains[1], pid_gains[2],
+                    timing_accurate=True, episode_done=False, learning_done=False
+                )
             
-            # 4. PID gain 적용 대기 (새로운 PID gain이 적용될 때까지)
-            print("⏳ [대기] PID gain 적용 대기 중... (100ms)")
-            time.sleep(0.1)  # 100ms 대기
+            # 3. PID 적용 대기
+            time.sleep(0.1)
             
             # 5. 새로운 PID gain으로 제어된 실제 상태 관측
-            print("🔍 [관측] 실제 제어 상태 관측 중...")
             actual_state, _ = self.comm.get_latest_state()
             if actual_state is not None:
                 # 실제 관측된 상태로 업데이트
                 actual_initial_state = create_initial_state([actual_state[0]], self.cfg['TARGET_FORCE'])
-                print(f"✅ [관측] 실제 상태: Force={actual_state[0]:.2f}N")
                 self._log("INFO", f"📊 실제 상태 관측: Force={actual_state[0]:.2f}N")
             else:
                 # 관측 실패 시 추정 상태 사용
@@ -1370,7 +1356,7 @@ class PIDGainOptimizationEnvironment:
             self.episode_start_time = time.perf_counter()
             self.current_pid_gains = pid_gains.copy()
             
-            print(f"📊 [수집] 15초 1kHz 데이터 수집 시작...")
+            
             self._log("INFO", f"📊 15초 1kHz 데이터 수집 시작...")
             start_time = time.perf_counter()
             data_count = 0
@@ -1423,7 +1409,6 @@ class PIDGainOptimizationEnvironment:
             self._log("INFO", f"📈 수집된 데이터 포인트: {data_count}개 (목표: {int(self.cfg['EPISODE_SECONDS'] * 1000)})")
             
             # 5. 에피소드 총보상 계산
-            print(f"🧮 [계산] 에피소드 보상 계산 중...")
             episode_reward, metrics = self.calculate_episode_reward(
                 self.episode_force_data, 
                 self.episode_pi_output_data,
@@ -1433,7 +1418,6 @@ class PIDGainOptimizationEnvironment:
             print(f"🏆 [결과] 보상: {episode_reward:.2f}, RMSE: {metrics['rmse']:.2f}, 오버슈트: {metrics['overshoot']:.1f}%")
             
             # 6. Transition 저장 (한 스텝 MDP) - 실제 관측된 초기 상태 사용
-            print(f"💾 [저장] Transition 저장 중...")
             final_state = np.zeros(self.cfg["STATE_DIM"], dtype=np.float32)  # 최종 상태는 zero로 설정
             self.agent.store_transition(actual_initial_state, pid_gains, episode_reward, final_state, True)
             
@@ -1449,9 +1433,9 @@ class PIDGainOptimizationEnvironment:
             episode_stats.append(episode_stat)
             self.agent.episode_rewards.append(episode_reward)
             
-            # RewardBreakdownLogger 플러시 (에피소드 경계에서)
+            # RewardBreakdownLogger 플러시 (에피소드 경계에서) - 그래프 생성은 최종에만
             if hasattr(self, 'rlogger'):
-                self.rlogger.flush_if_needed(ep+1, force=True, episode_rewards=self.agent.episode_rewards)
+                self.rlogger.flush_if_needed(ep+1, force=False, episode_rewards=self.agent.episode_rewards)
             
             # 최고 성능 PID gain 저장
             if episode_reward > best_reward:
@@ -1488,7 +1472,6 @@ class PIDGainOptimizationEnvironment:
             self._log("INFO", f"🏅 최고보상: {best_reward:.2f}")
             
             # 10. 이전 에피소드 정보 업데이트
-            print(f"📚 [업데이트] 이전 에피소드 정보 저장 중...")
             self.previous_pid_gains = pid_gains.copy()
             
             # 에피소드 히스토리 업데이트 (최근 5개 에피소드만 유지)
@@ -1522,8 +1505,6 @@ class PIDGainOptimizationEnvironment:
                 print("⚠️  [경고] 에피소드 데이터 없음, 에러 히스토리 업데이트 건너뜀")
             
             print(f"💾 [저장] 다음 에피소드용 PID: Kp={self.previous_pid_gains[0]:.2f}, Ki={self.previous_pid_gains[1]:.2f}, Kd={self.previous_pid_gains[2]:.2f}")
-            self._log("INFO", f"📚 이전 PID 저장: {self.previous_pid_gains}")
-            self._log("INFO", f"📈 에피소드 히스토리: {len(self.episode_history)}개 (최대 5개)")
             
             # 11. 에피소드별 제어 지표 저장
             print(f"💾 [저장] 에피소드 지표 저장 중...")
@@ -1563,13 +1544,10 @@ class PIDGainOptimizationEnvironment:
                 print(f"❌ [오류] 에피소드 {ep+1} 완료 신호 + 다음 PID 전송 실패")
                 self._log("ERROR", f"에피소드 {ep+1} 완료 신호 + 다음 PID 전송 실패")
             
-            print(f"✅ [완료] 에피소드 {ep+1} 완료! 다음 에피소드 준비 중...")
-            print("=" * 80)
             
-            # 13. 로봇 리셋 대기
-            if ep < episodes - 1:  # 마지막 에피소드가 아닌 경우
-                self._log("INFO", "🔄 로봇 리셋 대기 중...")
-                time.sleep(2.0)  # 리셋 대기 시간
+            # 12. 로봇 리셋 대기
+            if ep < episodes - 1:
+                time.sleep(2.0)
         
         # 12. 최종 결과
         self._log("INFO", "\n🎯 PID Gain 최적화 완료!")
@@ -1638,13 +1616,7 @@ def signal_handler(signum, frame):
                 print(f"⚠️ 제어 성능 지표 저장 실패: {e}")
             
             # ==== ADDED: Learning Done 폴더에 파일들 복사 ====
-            try:
-                print("📁 Learning Done 폴더에 파일들 복사 중...")
-                env.ldlogger.copy_episode_rewards(env.agent.episode_rewards, env.rlogger.log_dir)
-                env.ldlogger.copy_reward_breakdown(env.rlogger.log_dir)
-                print("✅ Learning Done 폴더 복사 완료!")
-            except Exception as e:
-                print(f"⚠️ Learning Done 폴더 복사 실패: {e}")
+            # 이미 learning_done 폴더 안에 생성되므로 복사 불필요
             
             
             Logger.log("INFO", "✅ 데이터 저장 완료!")
@@ -1665,9 +1637,8 @@ class ControlPerformanceLogger:
     def __init__(self, log_dir):
         self.base_log_dir = log_dir
         # 실행별 고유 폴더 생성
-        now = datetime.now()
-        timestamp = now.strftime("%y%m%d_%Hh%Mm")
-        self.log_dir = os.path.join(log_dir, f"learning_done_{timestamp}")
+        # log_dir는 이미 learning_done_YYMMDD_HHhMMm 형태
+        self.log_dir = log_dir
         self.control_perf_dir = os.path.join(self.log_dir, "control_performance")
         os.makedirs(self.control_perf_dir, exist_ok=True)
         
@@ -1690,23 +1661,15 @@ class ControlPerformanceLogger:
         self.episode_metrics = []
         
         print(f"📁 Control Performance 저장 폴더: {self.control_perf_dir}")
-        print(f"🎨 폰트 설정: Times New Roman (제목: 36pt, 축제목: 32pt, 축숫자: 30pt)")
     
     def _setup_fonts(self):
-        """논문용 폰트 설정 (Times New Roman)"""
+        """폰트 설정 (기본 크기)"""
         try:
             import matplotlib.pyplot as plt
             plt.rcParams['font.family'] = 'Times New Roman'
-            plt.rcParams['font.size'] = 30  # 기본 폰트 크기
-            plt.rcParams['axes.titlesize'] = 36  # 그래프 제목
-            plt.rcParams['axes.labelsize'] = 32  # 축 제목
-            plt.rcParams['xtick.labelsize'] = 30  # x축 숫자
-            plt.rcParams['ytick.labelsize'] = 30  # y축 숫자
-            plt.rcParams['legend.fontsize'] = 28  # 범례
-            plt.rcParams['figure.titlesize'] = 36  # 전체 그림 제목
-            print("✅ 폰트 설정 완료: Times New Roman")
+            # 기본 크기 사용 (matplotlib 기본값)
         except Exception as e:
-            print(f"⚠️ 폰트 설정 실패: {e}")
+            pass  # 폰트 설정 실패해도 그래프는 생성됨
             print("기본 폰트 사용")
 
     def add_data_point(self, time, force, target, control_effort, pi_output, pid_gains=None):
@@ -2194,7 +2157,7 @@ class ControlPerformanceLogger:
         
         # 4x4 서브플롯 생성
         fig, axes = plt.subplots(4, 4, figsize=(20, 16))
-        fig.suptitle('PID Gain Optimization Performance Dashboard', fontweight='bold', fontsize=36)
+        fig.suptitle('PID Gain Optimization Performance Dashboard', fontweight='bold')
         
         # 주요 지표들 선택
         key_metrics = [
@@ -2424,7 +2387,7 @@ class ControlPerformanceLogger:
         
         # 2x2 서브플롯 생성
         fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-        fig.suptitle('Step-based Performance Dashboard', fontweight='bold', fontsize=36)
+        fig.suptitle('Step-based Performance Dashboard', fontweight='bold')
         
         time_array = np.array(self.time_data)
         force_array = np.array(self.force_data)
@@ -2504,45 +2467,15 @@ class LearningDoneLogger:
     - 학습 결과 통합 저장
     """
     def __init__(self, log_dir):
-        self.base_log_dir = log_dir
+        # 타임스탬프 기반 learning_done 폴더 한 번만 생성
         now = datetime.now()
         timestamp = now.strftime("%y%m%d_%Hh%Mm")
         self.log_dir = os.path.join(log_dir, f"learning_done_{timestamp}")
-        self.reward_breakdown_dir = os.path.join(self.log_dir, "reward_breakdown")
         os.makedirs(self.log_dir, exist_ok=True)
-        os.makedirs(self.reward_breakdown_dir, exist_ok=True)
         
-        print(f"📁 Learning Done 저장 폴더: {self.log_dir}")
+        print(f"📁 Learning Done 폴더: {self.log_dir}")
 
-    def copy_episode_rewards(self, episode_rewards, rlogger_dir):
-        """episode_rewards 파일들을 learning_done 폴더로 복사"""
-        # CSV 복사
-        src_csv = os.path.join(rlogger_dir, "episode_rewards.csv")
-        dst_csv = os.path.join(self.log_dir, "episode_rewards.csv")
-        if os.path.exists(src_csv):
-            import shutil
-            shutil.copy2(src_csv, dst_csv)
-        
-        # PNG 복사
-        src_png = os.path.join(rlogger_dir, "episode_rewards.png")
-        dst_png = os.path.join(self.log_dir, "episode_rewards.png")
-        if os.path.exists(src_png):
-            import shutil
-            shutil.copy2(src_png, dst_png)
-
-    def copy_reward_breakdown(self, rlogger_dir):
-        """reward_breakdown 파일들을 learning_done/reward_breakdown 폴더로 복사"""
-        import shutil
-        import glob
-        
-        # reward_breakdown 관련 파일들 찾기
-        pattern = os.path.join(rlogger_dir, "reward_breakdown*")
-        files = glob.glob(pattern)
-        
-        for src_file in files:
-            filename = os.path.basename(src_file)
-            dst_file = os.path.join(self.reward_breakdown_dir, filename)
-            shutil.copy2(src_file, dst_file)
+    # 복사 함수 제거 - 이미 learning_done 폴더 안에 생성되므로 복사 불필요
 
 # =========================
 # Reward Breakdown Logger
@@ -2556,11 +2489,8 @@ class RewardBreakdownLogger:
     - Ctrl+C/학습 완료 시 자동 저장
     """
     def __init__(self, log_dir):
-        self.base_log_dir = log_dir
-        # 실행별 고유 폴더 생성 (오늘날짜_시작시간 형식)
-        now = datetime.now()
-        timestamp = now.strftime("%y%m%d_%Hh%Mm")
-        self.log_dir = os.path.join(log_dir, f"reward_breakdown_{timestamp}")
+        # learning_done 폴더 내부의 reward_breakdown 서브폴더 사용 (중복 방지)
+        self.log_dir = os.path.join(log_dir, "reward_breakdown")
         os.makedirs(self.log_dir, exist_ok=True)
         self.rows = []  # 버퍼
         self.csv_path = os.path.join(self.log_dir, "reward_breakdown.csv")
@@ -2708,42 +2638,31 @@ class RewardBreakdownLogger:
     def flush_if_needed(self, current_episode, force=False, episode_rewards=None):
         """
         CSV 저장 + PNG 시각화를 수행.
-        force=True이면 언제든 실행, False이면 실행하지 않음.
+        force=True이면 언제든 실행, False이면 CSV만 저장 (PNG 생성 안 함).
         episode_rewards: 에피소드별 보상 리스트 (선택사항)
         """
-        # 강제 실행이 아니면 실행하지 않음 (자동 저장 비활성화)
-        if not force:
-            return
-        
         # 데이터가 없으면 실행하지 않음
         if not self.rows:
             return
             
-        # CSV 저장 (overwrite 방식으로 통일)
+        # CSV는 항상 저장 (메모리 절약)
         self.save_reward_breakdown_csv()
         
-        # 에피소드별 보상 저장 (제공된 경우)
-        if episode_rewards is not None:
-            self.save_episode_rewards(episode_rewards)
-            # 에피소드별 보상 그래프도 생성
-            self.generate_episode_reward_graph(episode_rewards)
+        # force=True일 때만 PNG 생성 (최종에만)
+        if force:
+            # 에피소드별 보상 저장 및 그래프 생성
+            if episode_rewards is not None:
+                self.save_episode_rewards(episode_rewards)
+                self.generate_episode_reward_graph(episode_rewards)
+            
+            # PNG 생성 (전체 데이터)
+            start_ep = min(row["episode"] for row in self.rows)
+            end_ep = max(row["episode"] for row in self.rows)
+            self._plot_png(start_ep, end_ep)
+            
+            print(f"✅ Reward breakdown 저장: {self.log_dir}")
         
-        # PNG 생성 (전체 데이터)
-        start_ep = min(row["episode"] for row in self.rows)
-        end_ep = max(row["episode"] for row in self.rows)
-        self._plot_png(start_ep, end_ep)
-        
-        # 저장 완료 메시지
-        print(f"✅ Reward breakdown 저장 완료: {self.log_dir}")
-        print(f"   📊 CSV: reward_breakdown.csv")
-        if episode_rewards is not None:
-            print(f"   📈 CSV: episode_rewards.csv")
-        print(f"   📈 PNG: reward_breakdown_*_ep{start_ep}-{end_ep}.png (5개 파일)")
-        
-        # CSV에 저장했으니 rows를 비워도 되지만,
-        # 전체 기간 그래프를 원할 수도 있어 유지 선택 가능.
-        # 여기서는 메모리 절약 위해 비움.
-        self.rows.clear()
+        # 메모리 절약을 위해 rows 유지 (전체 그래프용)
 
 # =========================
 # MAIN EXECUTION
