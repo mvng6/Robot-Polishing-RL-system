@@ -1401,9 +1401,9 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 	// ===============================================
 	// PID 게인 및 바운드 설정
 	g_pDlg->m_pidctrl.setGains(
-		80.0,			// Kp
-		130.0,			// Ki
-		0.5);			// Kd
+		56.0,			// Kp
+		169.0,			// Ki
+		0.0);			// Kd
 	g_pDlg->m_pidctrl.setOutputLimits(
 		-1500.0,		// min
 		1500.0);		// max
@@ -1486,12 +1486,6 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 
 			if (episode_ended)
 			{
-				// ====================================
-				// 코드 수정 필요 부분
-				// Target force 고정
-				// PID 게인값은 RL PC에서 보내는 값으로 치환
-				// PID 수신 패킷 및 순서 수정
-
 				/*std::random_device rd;
 				std::mt19937 gen(rd());
 				std::uniform_int_distribution<> dist(35, 50);
@@ -1721,7 +1715,7 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 					// 현재 로봇위치가 평면 구동 종료 위치를 넘어가는지 확인
 					//   - 평면 구동 종료 위치는 사용자가 설정한 x_pos_bound[1] 값
 					//   - 평면 구동 종료 위치에 도달하면 Control Step = 3 단계로 이동
-					if (Th_robotData_flat.flangePos[0] >= g_pDlg->m_setting.x_pos_bound[1])
+					if (Th_robotData_flat.flangePos[0] >= g_pDlg->m_setting.x_pos_bound[1] + 70)
 					{
 						g_pDlg->m_setting.vx_mms.store(0.0);	// [mm/s]
 						g_pDlg->m_setting.First_Contact.store(true);
