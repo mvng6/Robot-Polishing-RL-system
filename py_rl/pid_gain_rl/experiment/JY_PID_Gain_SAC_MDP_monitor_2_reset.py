@@ -199,7 +199,7 @@ class Constants:
     DEFAULT_LR = 1e-3  # 학습률 증가: 더 적극적인 탐색
     DEFAULT_GAMMA = 0.99
     DEFAULT_TAU = 0.01
-    DEFAULT_PID_RANGE = {"Kp": (40.0, 120.0), "Ki": (70.0, 200.0), "Kd": (0.0, 0.1)}  # P,I 범위 확대, D=0~0.1 학습
+    DEFAULT_PID_RANGE = {"Kp": (40.0, 120.0), "Ki": (70.0, 200.0), "Kd": (0.0, 0.05)}  # P,I 범위 확대, D=0~0.05 학습
     DEFAULT_RECV_FREQ = 1000
     DEFAULT_BATCH_SIZE = 128
     DEFAULT_EPISODES = 500
@@ -238,7 +238,7 @@ class Constants:
 # ========== CONFIG 설정 ==========
 _BASE_CONFIG = {
     "STATE_DIM": 12,
-    "ACTION_DIM": 3,  # P, I, D 모두 학습 (D=0~1)
+    "ACTION_DIM": 3, 
     "HIDDEN": Constants.DEFAULT_HIDDEN_DIM,
     "LR": Constants.DEFAULT_LR,
     "GAMMA": Constants.DEFAULT_GAMMA,
@@ -312,7 +312,7 @@ def scale_action_to_pid(action, pid_range):
     return np.array([
         scale_single(action[0], *pid_range["Kp"]),
         scale_single(action[1], *pid_range["Ki"]),
-        scale_single(action[2], *pid_range["Kd"]),  # D값도 학습 (0~1)
+        scale_single(action[2], *pid_range["Kd"]),  
     ], dtype=np.float32)
 
 def create_initial_state(force_data, target_force=-45.0, previous_pid_gains=None, historical_errors=None, episode_history=None):
@@ -991,66 +991,57 @@ class PIDGainOptimizationEnvironment:
 
     def _relax_update_and_check(self, now_ts: float) -> bool:
         """
-        RELAX 감지 로직:
-        A1: pi_output >= relax_pressure_thr 이 창 구간의 ≥95% (고압 + 오차 증가)
-        A2: desired force와 current force의 절대값 오차가 지속적으로 커질 때
-        A3: pi_output <= relax_low_pressure_thr 이 창 구간의 ≥95% (저압 + 수렴 안 됨)
-        
-        guard 시간(PID on + 2.0s)과 창 길이(2.5s) 조건을 모두 만족해야 판정.
-        
-        ⚠️ 센서 좌표계 고려: 누르는 방향이 음수 (예: -45N)
-        → Relaxation 시: -45N → -44N → -43N (절댓값이 감소)
+        RELAX 감지(시간 기반):
+        A1: 고압(>= relax_pressure_thr) 시간 비율 ≥ 95%
+        A2: |오차| ≥ 5 N 상태의 '누적 시간'이 2.5 s 이상
+        A3: 저압(<= relax_low_pressure_thr) 시간 비율 ≥ 95% 이면서 목표 수렴 실패
+        guard: PID ON 후 relax_guard_s 경과 + 창 길이 확보(_relax_win_N)
         """
-        # guard 시간 미도달
+        # ---- Guard ----
         if self._relax_pid_on_ts is None or (now_ts - self._relax_pid_on_ts) < self.relax_guard_s:
             return False
-
-        # 창 길이 부족
         if len(self.relax_time_win) < self._relax_win_N:
             return False
 
-        # --- A1: 고압 유지율 (기존 조건) ---
-        pi_arr = np.asarray(self.relax_pi_win, dtype=np.float64)
-        high_ratio = float(np.mean(pi_arr >= self.relax_pressure_thr))
-        a1 = (high_ratio >= 0.95)
-
-        # --- A2: desired force와 current force의 절대값 오차가 지속적으로 커질 때 ---
-        # 센서 좌표계: 누르는 방향 = 음수 → 절댓값 사용
+        # ---- Arrays & dt (시간 기반 누적) ----
         t = np.asarray(self.relax_time_win, dtype=np.float64)
-        f_abs = np.abs(np.asarray(self.relax_force_win, dtype=np.float64))  # 절댓값 변환
-        target_force_abs = abs(self.cfg['TARGET_FORCE'])
-        
-        # 절대값 오차 계산: |current_force| - |target_force|
-        abs_error = np.abs(f_abs - target_force_abs)
-        
-        t0 = t.mean()
-        tt = t - t0
-        denom = (tt**2).sum()
-        if denom <= 1e-12:
+        if not np.all(np.isfinite(t)) or t.size < 2:
             return False
-        
-        # 절대값 오차의 기울기 계산 (N/s)
-        error_slope = (tt * (abs_error - abs_error.mean())).sum() / denom
-        
-        # Relaxation: 절대값 오차가 증가 (error_slope > 0) + 기준치 이상
-        # 오차가 1초에 0.01N 이상 증가하는 경우를 relaxation으로 판단 (매우 민감하게)
-        a2 = (error_slope >= 0.01)
+        dt = np.diff(t, prepend=t[0])
+        dt[dt < 0.0] = 0.0
+        win_duration = float(t[-1] - t[0])
+        if win_duration <= 0.0:
+            return False
 
-        # --- A3: 저압 유지 + 목표값 수렴 안 됨 (새 조건) ---
-        low_ratio = float(np.mean(pi_arr <= self.relax_low_pressure_thr))
-        a3_low_pressure = (low_ratio >= 0.95)
-        
-        # 현재 힘이 목표값으로 수렴하지 않음 (절댓값 기준)
-        target_force_abs = abs(self.cfg['TARGET_FORCE'])
-        force_abs = np.abs(np.asarray(self.relax_force_win, dtype=np.float64))
-        
-        # 창 내에서 목표값과의 최소 차이
-        min_force_diff = np.min(np.abs(force_abs - target_force_abs))
-        a3_not_converged = (min_force_diff >= self.relax_force_target_tol)
-        
-        a3 = a3_low_pressure and a3_not_converged
+        pi_arr = np.asarray(self.relax_pi_win, dtype=np.float64)
+        f_abs = np.abs(np.asarray(self.relax_force_win, dtype=np.float64))
+        target_abs = abs(self.cfg['TARGET_FORCE'])
 
-        # A1&A2 (기존) 또는 A3 (새 조건) 중 하나라도 만족하면 RELAX
+        # ---- Params (요청값 반영) ----
+        error_abs_thr  = 2.5       # 절대 오차 임계
+        sustain_target = 2.5       # 지속 시간(초)
+        ratio_thr      = 0.95      # 고압/저압 시간 비율 임계
+
+        # 창 길이가 약간 부족해도 작동하도록(버퍼 경계 안전장치)
+        sustain_time = min(sustain_target, ratio_thr * win_duration)
+
+        # ---- A1: 고압 시간 비율 ≥ 95% ----
+        high_time = float(np.sum(dt[pi_arr >= self.relax_pressure_thr]))
+        a1 = (high_time / win_duration) >= ratio_thr
+
+        # ---- A2: |오차| ≥ 5N 누적시간 ≥ 2.5s(또는 창의 95%) ----
+        abs_error = np.abs(f_abs - target_abs)
+        over_time = float(np.sum(dt[abs_error >= error_abs_thr]))
+        a2 = over_time >= sustain_time
+
+        # ---- A3: 저압 지속 + 수렴 실패 ----
+        low_time = float(np.sum(dt[pi_arr <= self.relax_low_pressure_thr]))
+        a3_low = (low_time / win_duration) >= ratio_thr
+        min_diff = float(np.min(np.abs(f_abs - target_abs)))
+        a3_not_conv = (min_diff >= self.relax_force_target_tol)
+        a3 = a3_low and a3_not_conv
+
+        # ---- 최종 ----
         return bool((a1 and a2) or a3)
     
     def calculate_episode_reward(self, force_data, pi_output_data, target_force=None, episode_len_s=None):
@@ -1600,7 +1591,8 @@ class PIDGainOptimizationEnvironment:
                     self.pid_gains_next[0], self.pid_gains_next[1], self.pid_gains_next[2],
                     timing_accurate=True, episode_done=True, learning_done=False
                 )
-                print(f"📤 [RELAX] 다음 에피소드 PID 전송 완료")
+                print(f"📤 [RELAX] 다음 에피소드 PID 전송 완료 (episode_done=True)")
+                print(f"🔧 [DEBUG] episode_done=True 전송 확인!")
                 continue
             
             # 5. 에피소드 총보상 계산
