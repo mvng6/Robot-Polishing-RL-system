@@ -1,0 +1,22 @@
+{
+    "open-in-browser.default": "chrome",
+    "diffEditor.wordWrap": "on",
+    "editor.wordWrap": "on",
+    "workbench.colorTheme": "Monokai",
+    "workbench.iconTheme": "vscode-icons",
+    "editor.linkedEditing": true,
+    "[html]": {
+        "editor.defaultFormatter": "vscode.html-language-features"
+    },
+    "editor.mouseWheelZoom": true,
+    "vsicons.dontShowNewVersionMessage": true,
+    "liveServer.settings.donotShowInfoMsg": true,
+    "editor.renderWhitespace": "none",
+    "editor.minimap.enabled": false,
+    "editor.renderControlCharacters": false,
+    "workbench.startupEditor": "none",
+    "html.hover.references": false,
+    "window.zoomLevel": 1,
+    "workbench.editor.empty.hint": "hidden",
+    "editor.stickyScroll.enabled": false,
+}

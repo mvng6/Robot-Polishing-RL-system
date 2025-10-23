@@ -54,6 +54,9 @@ CRobotCommSWDJv5Dlg::CRobotCommSWDJv5Dlg(CWnd* pParent /*=nullptr*/)
 	var_chamber_volt_gui(0),		// 공압 챔버 전압 GUI 변수 초기화
 	var_spindle_air_gui(0),			// 공압 스핀들 압력 GUI 변수 초기화
 	var_spindle_volt_gui(0)			// 공압 스핀들 전압 GUI 변수 초기화	
+	, var_gain_p_gui(0)
+	, var_gain_i_gui(0)
+	, var_gain_d_gui(0)
 {
 	m_hIcon = AfxGetApp()->LoadIcon(IDR_MAINFRAME);  // 기본 아이콘 설정
 
@@ -1370,7 +1373,7 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 
 	// ===============================================
 	// 실험 설정
-	g_pDlg->m_setting.Target_Force_N.store(-35.0f);				// 목표 접촉력 설정 (N)   [음수로 설정해줘야 로봇 베이스 좌표계와 동일한 방향]
+	g_pDlg->m_setting.Target_Force_N.store(-45.0f);				// 목표 접촉력 설정 (N)   [음수로 설정해줘야 로봇 베이스 좌표계와 동일한 방향]
 	g_pDlg->m_setting.Force_limit_N.store(85.0f);				// 접촉력 제한값 설정 (N)
 	g_pDlg->m_setting.Target_vz.store(5.0f);					// 목표 접촉 속도 설정 (mm/s) [양수로 설정해줘야 로봇 베이스 좌표계와 동일한 방향]
 	int Saturation_time = 5000;									// 접촉 유지 시간 설정 (ms)
@@ -1405,6 +1408,8 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 		-1500.0,		// min
 		1500.0);		// max
 
+	double debug_p, debug_i, debug_d;
+
 	// ===============================================
 	// RL 통신용 변수 초기화
 	float RL_previous_error_force_z = 0.0f;						// 이전 접촉력 오차값 초기화
@@ -1425,7 +1430,7 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 	//g_pDlg->m_pThread_Logger = AfxBeginThread(Thread_Logger, g_pDlg);
 
 	// ===============================================
-	// ✨ 추가된 코드: 메시지 수신 주기 측정을 위한 변수
+	// 메시지 수신 주기 측정을 위한 변수
 	// ===============================================
 	static bool is_first_message = true;
 	static auto last_message_time = std::chrono::steady_clock::now();
@@ -1440,6 +1445,14 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 		// 로봇 & 센서 정보 수신
 		auto Th_robotData_flat = g_pDlg->m_robotState.getSnapshot();
 		auto Th_sensorData_flat = g_pDlg->m_ftSensor.getSnapshot();
+
+		// 현재 설정된 PID 게인값 확인
+		g_pDlg->m_pidctrl.getGains(debug_p, debug_i, debug_d);
+		
+		// 읽어온 PID 게인값을 GUI 변수에 할당
+		g_pDlg->var_gain_p_gui = debug_p;
+		g_pDlg->var_gain_i_gui = debug_i;
+		g_pDlg->var_gain_d_gui = debug_d;
 
 		// =========================================================================
 		// 1. 서버로부터 데이터 수신
@@ -1468,17 +1481,31 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 			RL_confirm = g_pDlg->m_received_RL_Confirm_Flag.load();
 			episode_ended = g_pDlg->m_received_RL_Episode_Flag.load();
 			RL_end = g_pDlg->m_received_RL_End_Flag.load();
-			g_pDlg->m_tcpip.rl_pressure_from_server = g_pDlg->m_received_RL_Pressure.load();
+			//g_pDlg->m_tcpip.rl_pressure_from_server = g_pDlg->m_received_RL_Pressure.load();
 			RL_count++;
 
 			if (episode_ended)
 			{
-				std::random_device rd;
+				// ====================================
+				// 코드 수정 필요 부분
+				// Target force 고정
+				// PID 게인값은 RL PC에서 보내는 값으로 치환
+				// PID 수신 패킷 및 순서 수정
+
+				/*std::random_device rd;
 				std::mt19937 gen(rd());
 				std::uniform_int_distribution<> dist(35, 50);
 				int random_force = dist(gen);
 
-				g_pDlg->m_setting.Target_Force_N.store(-1.0f * random_force);
+				g_pDlg->m_setting.Target_Force_N.store(-1.0f * random_force);*/
+
+				g_pDlg->m_pidctrl.setGains(
+					g_pDlg->m_received_RL_P_Gain.load(),
+					g_pDlg->m_received_RL_I_Gain.load(),
+					g_pDlg->m_received_RL_D_Gain.load()
+				);
+
+				// ====================================
 
 				RL_count = 0;
 				g_pDlg->m_received_RL_Episode_Flag.store(false);
@@ -1486,7 +1513,7 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 				g_pDlg->m_setting.First_Contact.store(true);
 				g_pDlg->m_setting.Control_Step = 99;			// 에피소드 종료로 인한 환경 리셋
 
-				printf(">> 환경 리셋! 새 목표 접촉력: %.2f N <<\n", -1.0f * random_force);
+				//printf(">> 환경 리셋! 새 목표 접촉력: %.2f N <<\n", -1.0f * random_force);
 			}
 			else if (RL_end)
 			{
@@ -1496,12 +1523,16 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 			else
 			{
 				if (reception_period_ms > 0.0) {
-					printf("RL PC로부터 %d번째 메세지 수신 성공! (RL_P: %f) | 수신 주기: %.2f ms\n",
-						RL_count, g_pDlg->m_tcpip.rl_pressure_from_server.load(), reception_period_ms);
+					/*printf("RL PC로부터 %d번째 메세지 수신 성공! (RL_P: %f) | 수신 주기: %.2f ms\n",
+						RL_count, g_pDlg->m_tcpip.rl_pressure_from_server.load(), reception_period_ms);*/
+					printf("RL PC로부터 %d번째 메세지 수신 성공! (RL_Gain: %.3f\t%.3f\t%.3f) | 수신 주기: %.2f ms\n",
+						RL_count, g_pDlg->m_received_RL_P_Gain.load(),g_pDlg->m_received_RL_I_Gain.load(),g_pDlg->m_received_RL_D_Gain.load(), reception_period_ms);
 				}
 				else {
-					printf("RL PC로부터 %d번째 메세지 수신 성공! (RL_P: %f) | (첫 메시지)\n",
-						RL_count, g_pDlg->m_tcpip.rl_pressure_from_server.load());
+					/*printf("RL PC로부터 %d번째 메세지 수신 성공! (RL_P: %f) | (첫 메시지)\n",
+						RL_count, g_pDlg->m_tcpip.rl_pressure_from_server.load());*/
+					printf("RL PC로부터 %d번째 메세지 수신 성공! (RL_Gain: %.3f\t%.3f\t%.3f) | (첫 메시지)\n",
+						RL_count, g_pDlg->m_received_RL_P_Gain.load(), g_pDlg->m_received_RL_I_Gain.load(), g_pDlg->m_received_RL_D_Gain.load());
 				}
 			}
 			
@@ -1703,7 +1734,8 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 				g_pDlg->m_servoctrl.vz_cmd.store(g_pDlg->m_setting.vz_mms);									// [mm/s]
 
 				// [MPa] 출력 챔버 공압 최종 설정 (PID 제어값 + RL 제어값)
-				g_pDlg->m_airctrl.setDesiredChamberPressure(g_pDlg->m_airctrl.desiredChamberPressure() + g_pDlg->m_tcpip.rl_pressure_from_server);
+				//g_pDlg->m_airctrl.setDesiredChamberPressure(g_pDlg->m_airctrl.desiredChamberPressure() + g_pDlg->m_tcpip.rl_pressure_from_server);
+				g_pDlg->m_airctrl.setDesiredChamberPressure(g_pDlg->m_airctrl.desiredChamberPressure());
 			}
 			// Control Step.3: 평면 경로 구동 마무리
 			else if (g_pDlg->m_setting.Control_Step == 3)
@@ -2316,7 +2348,9 @@ void CRobotCommSWDJv5Dlg::UpdateGUI()
 		{ IDC_VAR_FREQ_SERVO,      (float)var_freq_servo },
 		{ IDC_VAR_FREQ_FT_SENSOR,  (float)var_freq_ft_sensor },
 		{ IDC_VAR_FREQ_MAIN,       (float)var_freq_main },
-		{ IDC_VAR_RESIDUAL_PRESSURE, (float)var_RL_Pressure }
+		{ IDC_VAR_GAIN_P,          (float)var_gain_p_gui },
+		{ IDC_VAR_GAIN_I,          (float)var_gain_i_gui },
+		{ IDC_VAR_GAIN_D,          (float)var_gain_d_gui}
 	};
 	for (auto& it : miscItems) {
 		CString txt;
@@ -2686,9 +2720,11 @@ void CRobotCommSWDJv5Dlg::OnRlDataReceived(const RLAgentPacket& packet)
 {
 	// 모든 처리가 끝난 깨끗한 구조체를 바로 사용
 	// 원자적 멤버 변수에 값 저장 (스레드 안전)
-	m_received_RL_Pressure.store(packet.RL_ResidualP);
+	//m_received_RL_Pressure.store(packet.RL_ResidualP);
+	m_received_RL_P_Gain.store(packet.RL_gain_P);
+	m_received_RL_I_Gain.store(packet.RL_gain_I);
+	m_received_RL_D_Gain.store(packet.RL_gain_D);
 	m_received_RL_Confirm_Flag.store(packet.RL_MessagerecvFlag == 1);
 	m_received_RL_Episode_Flag.store(packet.RL_EpisodeFlag == 1);
 	m_received_RL_End_Flag.store(packet.RL_EndFlag == 1);
-
 }
