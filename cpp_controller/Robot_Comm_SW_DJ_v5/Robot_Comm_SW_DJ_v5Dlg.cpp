@@ -659,26 +659,29 @@ UINT CRobotCommSWDJv5Dlg::Thread_Servo(LPVOID pParam)
 		{
 			if (g_pDlg->m_flags.loadTraj.load() == false)
 			{
-				// ===================================
+				if (g_pDlg->m_setting.Control_Step != 2)	// 공압 제어 시 로봇 동작 명령 Off
+				{
+					// ===================================
 				// 평면 경로 구동용 (speedl 호출)
 				// 평면 경로 구동 시 원하는 이동 속도값 갱신
-				g_pDlg->m_servoctrl.servo_flange_vel_des_key[0] = g_pDlg->m_servoctrl.vx_cmd.load();
-				g_pDlg->m_servoctrl.servo_flange_vel_des_key[1] = g_pDlg->m_servoctrl.vy_cmd.load();
-				g_pDlg->m_servoctrl.servo_flange_vel_des_key[2] = g_pDlg->m_servoctrl.vz_cmd.load();
+					g_pDlg->m_servoctrl.servo_flange_vel_des_key[0] = g_pDlg->m_servoctrl.vx_cmd.load();
+					g_pDlg->m_servoctrl.servo_flange_vel_des_key[1] = g_pDlg->m_servoctrl.vy_cmd.load();
+					g_pDlg->m_servoctrl.servo_flange_vel_des_key[2] = g_pDlg->m_servoctrl.vz_cmd.load();
 
-				// 실제 로봇 제어기로 로봇 구동 명령 송신
-				int servo_msg = Drfl.speedl(
-					g_pDlg->m_servoctrl.servo_flange_vel_des_key.data(),
-					g_pDlg->m_servoctrl.jacc.data(),
-					0.001f
-				);
+					// 실제 로봇 제어기로 로봇 구동 명령 송신
+					int servo_msg = Drfl.speedl(
+						g_pDlg->m_servoctrl.servo_flange_vel_des_key.data(),
+						g_pDlg->m_servoctrl.jacc.data(),
+						0.001f
+					);
 
-				// 실제 로봇 제어기로 로봇 구동 명령 송신 실패시 알림 및 로봇 구동 종료
-				if (servo_msg != 1)
-				{
-					g_pDlg->HandleServoError(servo_msg, _T("평면"));
-					break;
-				}
+					// 실제 로봇 제어기로 로봇 구동 명령 송신 실패시 알림 및 로봇 구동 종료
+					if (servo_msg != 1)
+					{
+						g_pDlg->HandleServoError(servo_msg, _T("평면"));
+						break;
+					}
+				}				
 			}
 			else
 			{
@@ -711,6 +714,7 @@ UINT CRobotCommSWDJv5Dlg::Thread_Servo(LPVOID pParam)
 					break;
 				}
 			}
+			
 		}
 		//////////////////////////////////////////////////////////////////////////
 		////while문 속도 제어+++++++++++++++++++++++++++++++++++++++++++++++++++++
@@ -1483,6 +1487,8 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 			RL_end = g_pDlg->m_received_RL_End_Flag.load();
 			//g_pDlg->m_tcpip.rl_pressure_from_server = g_pDlg->m_received_RL_Pressure.load();
 			RL_count++;
+			
+			printf("수신된 Flag : %d\t%d\t%d", RL_confirm, episode_ended, RL_end);
 
 			if (episode_ended)
 			{
