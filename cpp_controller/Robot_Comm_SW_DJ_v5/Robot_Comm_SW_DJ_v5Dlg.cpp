@@ -647,8 +647,8 @@ UINT CRobotCommSWDJv5Dlg::Thread_Servo(LPVOID pParam)
 		}
 		else if (abs(Th_sensorData_servo.filteredForce[2]) > 85.0)
 		{
-			if (stopRobotWithError(_T("Fz 접촉력 초과로 인한 정지")))
-				break;
+			if (stopRobotWithError(_T("Fz 접촉력 초과로 인한 정지")));
+				//break;
 		}
 		else if (abs(Th_robotData_servo.tcpVel[2]) > 30.0)
 		{
@@ -681,7 +681,12 @@ UINT CRobotCommSWDJv5Dlg::Thread_Servo(LPVOID pParam)
 						g_pDlg->HandleServoError(servo_msg, _T("평면"));
 						break;
 					}
-				}				
+					//printf("[INFO] 서보 명령 전송 중\n");
+				}
+				else
+				{
+					//printf("[INFO] 서보 명령 전송 종료!!!\n");
+				}
 			}
 			else
 			{
@@ -1377,7 +1382,7 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 
 	// ===============================================
 	// 실험 설정
-	g_pDlg->m_setting.Target_Force_N.store(-45.0f);				// 목표 접촉력 설정 (N)   [음수로 설정해줘야 로봇 베이스 좌표계와 동일한 방향]
+	g_pDlg->m_setting.Target_Force_N.store(-30.0f);				// 목표 접촉력 설정 (N)   [음수로 설정해줘야 로봇 베이스 좌표계와 동일한 방향]
 	g_pDlg->m_setting.Force_limit_N.store(85.0f);				// 접촉력 제한값 설정 (N)
 	g_pDlg->m_setting.Target_vz.store(5.0f);					// 목표 접촉 속도 설정 (mm/s) [양수로 설정해줘야 로봇 베이스 좌표계와 동일한 방향]
 	int Saturation_time = 5000;									// 접촉 유지 시간 설정 (ms)
@@ -1405,8 +1410,8 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 	// ===============================================
 	// PID 게인 및 바운드 설정
 	g_pDlg->m_pidctrl.setGains(
-		56.0,			// Kp
-		169.0,			// Ki
+		80.0,			// Kp
+		130.0,			// Ki
 		0.0);			// Kd
 	g_pDlg->m_pidctrl.setOutputLimits(
 		-1500.0,		// min
@@ -1508,6 +1513,8 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 					g_pDlg->m_received_RL_P_Gain.load(), g_pDlg->m_received_RL_I_Gain.load(), g_pDlg->m_received_RL_D_Gain.load());
 				// ====================================
 
+				g_pDlg->m_setting.Target_Force_N.store(-30.0f);
+				g_pDlg->m_airctrl.setDesiredChamberPressure(0.0);
 				RL_count = 0;
 				g_pDlg->m_received_RL_Episode_Flag.store(false);
 
@@ -1651,6 +1658,7 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 						g_pDlg->m_setting.vz_mms.store(0.0f);		// [mm/s] 접촉 유지 정지
 						g_pDlg->m_setting.First_Contact.store(true);
 						g_pDlg->m_setting.Control_Step = 2;
+						g_pDlg->m_setting.Target_Force_N.store(-40.0f);
 
 						// 힘제어 시퀀스 시작 알림을 위한 서버로 메세지 전송
 						g_pDlg->m_flags.RL_sanderactive_flag.store(true);
@@ -1797,7 +1805,7 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 					rampStartTime = system_clock::now();
 					g_pDlg->m_setting.First_Contact.store(false);
 					g_pDlg->m_flags.RL_sanderactive_flag.store(false);
-
+					
 					// 2. 동작 시작 시점의 상태 저장
 					start_pos_z = Th_robotData_flat.flangePos[2];
 
@@ -1833,7 +1841,6 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 						g_pDlg->m_setting.Control_Step = 0;
 
 						// 챔버 공압 ON (초기 환경 압력 설정)
-						g_pDlg->m_airctrl.setDesiredChamberPressure(0.2);
 
 						Status_gui_str.Format(_T("[평면 구동] Control Step 99: 환경 리셋 완료!!!"));
 						g_pDlg->var_status_gui.SetWindowTextW(Status_gui_str);
@@ -2504,7 +2511,7 @@ void CRobotCommSWDJv5Dlg::OnBnClickedButAirOn()
 {
 	m_flags.airTask.store(true);									// 공압 제어 태스크 활성화 플래그 설정	
 
-	m_airctrl.setDesiredChamberPressure(0.2);						// 초기 압력 설정
+	m_airctrl.setDesiredChamberPressure(0.0);						// 초기 압력 설정
 	m_airctrl.setDesiredSpindlePressure(0.0);						// 초기 스핀들 압력 설정
 
 	// =========================================
