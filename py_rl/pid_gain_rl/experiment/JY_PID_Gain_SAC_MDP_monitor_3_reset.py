@@ -251,15 +251,16 @@ class DataSaver:
 
 class Constants:
     DEFAULT_HIDDEN_DIM = 256
-    DEFAULT_LR = 3e-4  # 학습률 감소: 1e-3 → 3e-4 (안정적 학습)
+    DEFAULT_LR = 1e-4  # 학습률 추가 감소: 3e-4 → 1e-4 (초기 안정성 강화, NaN 방지)
     DEFAULT_GAMMA = 0.99
     DEFAULT_TAU = 0.01
-    # PID 범위 조정: P(30-100), I(30-150), D(0-0.05)
+    # PID 범위 (Fine-tuning 전용): P(35-45), I(45-55), D(1e-6-1e-3)
     DEFAULT_PID_RANGE = {
-        "Kp": (30.0, 100.0),
-        "Ki": (30.0, 150.0),
-        "Kd": (0.0, 0.05),
+        "Kp": (35.0, 45.0),
+        "Ki": (45.0, 55.0),
+        "Kd": (1e-6, 1e-3),
     }
+    DEFAULT_RECV_FREQ = 1000
     DEFAULT_RECV_FREQ = 1000
     DEFAULT_BATCH_SIZE = 128
     DEFAULT_EPISODES = 500
@@ -275,7 +276,9 @@ class Constants:
     DEFAULT_COMM_FAIL_MAX = 3
     DEFAULT_COMM_RETRY_DELAY = 0.1
     DEFAULT_MAX_REWARDS_HISTORY = 1000
-    DEFAULT_REPLAY_BUFFER_SIZE = 4000
+    DEFAULT_REPLAY_BUFFER_SIZE = 2000  # 절충안: 2000 (메모리 사용량 적당)
+    MIN_BUFFER_FOR_LEARNING = 32  # 학습 시작: 안정적 학습 보장 (최소 32개 필요)
+    MIN_BATCH_SIZE = 32  # 최소 배치 크기: 초기 학습 안정성 (최소 32개 필요)
     DEFAULT_MODEL_SAVE_DIR = (
         "/home/katech/Robot-Polishing-RL-system/"
         "py_rl/pid_gain_rl/saved_agents"
@@ -304,17 +307,22 @@ class Constants:
     PI_OUTPUT_MAX = 0.4
     PI_OUTPUT_SAT_THRESHOLD = 0.95
     
-    # 보상 함수 가중치 (PID 튜닝 최적화)
-    REWARD_WEIGHT_ACCURACY = 0.25      # RMSE (정확도)
-    REWARD_WEIGHT_BAND_QUALITY = 0.20  # 밴드 내 비율
-    REWARD_WEIGHT_FAST_SETTLE = 0.20   # 정착 속도 (PID 핵심) ↑
-    REWARD_WEIGHT_STABILITY = 0.10     # 안정성 (진동 억제) ↑
+    # 보상 함수 가중치 (점진적 오버슈트 페널티)
+    REWARD_WEIGHT_ACCURACY = 0.25      # RMSE (정확도) ↑
+    REWARD_WEIGHT_BAND_QUALITY = 0.20  # 밴드 내 비율 ↑
+    REWARD_WEIGHT_FAST_SETTLE = 0.15   # 정착 속도
+    REWARD_WEIGHT_STABILITY = 0.15     # 안정성 (진동 억제)
     REWARD_WEIGHT_EFFICIENCY = 0.05    # 효율성
     REWARD_WEIGHT_SMOOTHNESS = 0.05    # 부드러움
-    REWARD_WEIGHT_NO_SAT = 0.05        # 포화 방지 ↑
-    REWARD_PENALTY_OVERSHOOT = 0.40    # 오버슈트 (제곱 페널티 + 강화) ↑↑
-    REWARD_PENALTY_TRACKING_FAIL = 0.30  # 추종 실패 (RMSE 과다 + 정착 실패) ↑
-    REWARD_SUCCESS_BONUS_MAX = 0.20    # 성공 보너스 ↑
+    REWARD_WEIGHT_NO_SAT = 0.05        # 포화 방지
+    REWARD_PENALTY_OVERSHOOT = 0.30    # 오버슈트 (완화: 60% → 30%)
+    REWARD_PENALTY_TRACKING_FAIL = 0.20  # 추종 실패
+    REWARD_SUCCESS_BONUS_MAX = 0.20    # 성공 보너스
+    
+    # 점진적 오버슈트 페널티 임계값 (%, 절댓값)
+    OVERSHOOT_THRESHOLD_MILD = 5.0     # 5% 이하: 경미 (약한 페널티)
+    OVERSHOOT_THRESHOLD_MODERATE = 15.0  # 15% 이하: 보통 (중간 페널티)
+    OVERSHOOT_THRESHOLD_SEVERE = 30.0  # 30% 이상: 심각 (강한 페널티)
     
     # 추종 실패 기준
     TRACKING_FAIL_RMSE_THRESHOLD = 5.0  # RMSE > 5N이면 추종 실패로 간주
@@ -412,11 +420,23 @@ def change_episode_length(config, new_length_seconds):
 
 # 에이전트는 항상 -1~1 사이값만 학습, 실제 하드웨어는 적절한 PID 범위로 매핑
 def scale_action_to_pid(action, pid_range):
-    """액션을 PID 게인으로 스케일링 (벡터화)"""
+    """
+    액션을 PID 게인으로 스케일링 (벡터화)
+    - P, I: 소수점 2자리로 반올림 (과도한 정밀도 제거)
+    - D: 0.0 고정 (미분 작용 비활성화) - 정규화는 허용
+    """
     a = np.clip(np.asarray(action, dtype=np.float32), -1.0, 1.0)
     lo = np.array([pid_range["Kp"][0], pid_range["Ki"][0], pid_range["Kd"][0]], dtype=np.float32) 
     hi = np.array([pid_range["Kp"][1], pid_range["Ki"][1], pid_range["Kd"][1]], dtype=np.float32)
-    return lo + (a + 1.0) * 0.5 * (hi - lo) 
+    pid_gains = lo + (a + 1.0) * 0.5 * (hi - lo)
+    
+    # P, I: 소수점 2자리 반올림
+    pid_gains[0] = round(pid_gains[0], 2)  # Kp
+    pid_gains[1] = round(pid_gains[1], 2)  # Ki
+    # D: 하드웨어 전송 시에만 0.0으로, 리플레이 버퍼에는 실제 값 저장 (학습용)
+    pid_gains[2] = round(pid_gains[2], 4)  # Kd - 정밀도 유지
+    
+    return pid_gains 
 
 def create_initial_state(
     force_data,
@@ -528,7 +548,7 @@ def create_initial_state(
     # [9] performance_trend (최근 보상 추세, 성능이 좋아지는지, 나빠지는지 지표)
     # [10] avg_recent_performance (최근 에피소드 보상 평균)
     # [11] episode_count_norm (정규화된 에피소드 카운트, 0~1)
-    return np.array(
+    state = np.array(
         [
             current_force,
             target_force,
@@ -545,6 +565,21 @@ def create_initial_state(
         ],
         dtype=np.float32,
     )
+    
+    # 🔍 생성된 상태 검증 (NaN/Inf 체크)
+    if np.isnan(state).any() or np.isinf(state).any():
+        print(f"❌ [오류] create_initial_state에서 NaN/Inf 발견!")
+        print(f"   state: {state}")
+        print(f"   current_force: {current_force}, error: {error}")
+        print(f"   error_dot: {error_dot}, error_int: {error_int}")
+        # 안전한 기본값으로 대체
+        state = np.array([
+            target_force, target_force, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+        ], dtype=np.float32)
+        print(f"   → 기본값으로 대체: {state}")
+    
+    return state
 
 def _estimate_state_from_previous_pid(
     previous_pid_gains,
@@ -601,7 +636,7 @@ def _estimate_state_from_previous_pid(
         performance_trend = avg_recent_performance = 0.0
 
     estimated_force = target_force + avg_error
-    return np.array(
+    state = np.array(
         [
             estimated_force,
             target_force,
@@ -618,6 +653,20 @@ def _estimate_state_from_previous_pid(
         ],
         dtype=np.float32,
     )
+    
+    # 🔍 생성된 상태 검증 (NaN/Inf 체크)
+    if np.isnan(state).any() or np.isinf(state).any():
+        print(f"❌ [오류] _estimate_state_from_previous_pid에서 NaN/Inf 발견!")
+        print(f"   state: {state}")
+        print(f"   estimated_force: {estimated_force}, avg_error: {avg_error}")
+        # 안전한 기본값으로 대체
+        state = np.array([
+            target_force, target_force, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+        ], dtype=np.float32)
+        print(f"   → 기본값으로 대체: {state}")
+    
+    return state
 
 # ========== SAC Models ==========
 # Actor: 상태를 입력으로 받아 PID 게인을 출력, 3층 MLP(은닉 256) + ReLU 3번, 출력 헤드 2개 (평균, 표준편차)
@@ -641,10 +690,11 @@ class Actor(nn.Module):
         self._init_weights()
 
     def _init_weights(self):
-        """최적화된 가중치 초기화"""
+        """균형잡힌 가중치 초기화"""
         for m in self.modules():
             if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
+                # Orthogonal 초기화 (안정적 + 적절한 탐색)
+                nn.init.orthogonal_(m.weight, gain=0.5)  # 0.01 → 0.5 (적절한 탐색 허용)
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
 
@@ -653,6 +703,8 @@ class Actor(nn.Module):
         x = F.relu(self.fc2(x))
         x = F.relu(self.fc3(x))
         mean = self.mean_head(x)
+        # Mean 제한 (안정성 강화: 극단값 방지)
+        mean = torch.clamp(mean, -10.0, 10.0)
         log_std = torch.clamp(
             self.log_std_head(x), self.log_std_min, self.log_std_max
         )
@@ -661,6 +713,14 @@ class Actor(nn.Module):
     def sample(self, state):
         mean, log_std = self.forward(state)
         std = log_std.exp()
+        
+        # NaN 체크
+        if torch.isnan(mean).any() or torch.isnan(std).any():
+            print(f"⚠️ [경고] Actor 출력에 NaN 감지: mean={mean}, std={std}")
+            # 안전한 기본값 반환
+            mean = torch.zeros_like(mean)
+            std = torch.ones_like(std) * 0.5
+        
         normal = torch.distributions.Normal(mean, std)
         x_t = normal.rsample()
         action = torch.tanh(x_t)
@@ -683,7 +743,8 @@ class Critic(nn.Module):
     def _init_weights(self):
         for m in self.modules():
             if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
+                # Orthogonal 초기화 (안정적 + 적절한 탐색)
+                nn.init.orthogonal_(m.weight, gain=0.5)  # 0.01 → 0.5 (적절한 탐색 허용)
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
 
@@ -815,15 +876,61 @@ class PIDGainSACAgent:
             next_state: 최종 상태 (요약 또는 zero)
             done: 에피소드 종료 여부 (항상 True)
         """
+        # 🔍 저장 전 데이터 검증 (NaN/Inf 체크)
+        state_arr = np.array(state, dtype=np.float32)
+        next_state_arr = np.array(next_state, dtype=np.float32)
+        action_arr = np.array(action, dtype=np.float32)
+        
+        # NaN/Inf 검출
+        if (np.isnan(state_arr).any() or np.isinf(state_arr).any() or
+            np.isnan(next_state_arr).any() or np.isinf(next_state_arr).any() or
+            np.isnan(action_arr).any() or np.isinf(action_arr).any() or
+            np.isnan(reward) or np.isinf(reward)):
+            print(f"❌ [오류] 리플레이 버퍼 저장 실패 - NaN/Inf 검출!")
+            print(f"   state: {state_arr}")
+            print(f"   action: {action_arr}")
+            print(f"   reward: {reward}")
+            print(f"   next_state: {next_state_arr}")
+            return  # 저장하지 않음
+        
+        # 보상 범위 검증 및 클리핑
+        if reward < -100.0 or reward > 50.0:
+            print(f"⚠️ [경고] 비정상 보상 클리핑: {reward:.2f} → ", end="")
+            reward = np.clip(reward, -100.0, 50.0)
+            print(f"{reward:.2f}")
+        
         # PID gain을 [Kp, Ki, Kd] 모두 사용 (3차원)
         norm_action = self._normalize_pid_action(action)
-        self.replay.push(state, norm_action, reward, next_state, done)
+        
+        # 정규화된 액션도 검증
+        if np.isnan(norm_action).any() or np.isinf(norm_action).any():
+            print(f"❌ [오류] 정규화된 액션에 NaN/Inf 검출! 원본 action: {action}")
+            return  # 저장하지 않음
+        
+        self.replay.push(state_arr, norm_action, reward, next_state_arr, done)
+        print(f"✅ [저장] 리플레이 버퍼에 데이터 저장 완료 (보상: {reward:.2f})")
 
     def _normalize_pid_action(self, pid_action):
         """PID gain을 [-1, 1] 범위로 정규화 (Kp, Ki, Kd 모두)"""
 
         def normalize_single(v, lo, hi):
-            return 2.0 * (v - lo) / (hi - lo) - 1.0
+            # 범위 체크: lo == hi인 경우 (D gain처럼 고정값)
+            if abs(hi - lo) < 1e-9:
+                # 고정값이므로 정규화 불필요, 0.0 반환
+                return 0.0
+            
+            # 값 클리핑 (범위 내로 제한)
+            v = np.clip(v, lo, hi)
+            
+            # 정규화
+            normalized = 2.0 * (v - lo) / (hi - lo) - 1.0
+            
+            # 최종 안전 체크
+            if np.isnan(normalized) or np.isinf(normalized):
+                print(f"❌ [오류] 정규화 결과 비정상: v={v}, lo={lo}, hi={hi} → {normalized}")
+                return 0.0
+            
+            return normalized
 
         return np.array(
             [
@@ -855,6 +962,15 @@ class PIDGainSACAgent:
             r = torch.FloatTensor(r).unsqueeze(1).to(self.device)
             ns = torch.FloatTensor(ns).to(self.device)
             d = torch.FloatTensor(d).unsqueeze(1).to(self.device)
+            
+            # 입력 데이터 검증 (NaN/Inf 체크)
+            if (torch.isnan(s).any() or torch.isnan(a).any() or 
+                torch.isnan(r).any() or torch.isinf(r).any()):
+                print(f"⚠️ [경고] 배치 데이터에 NaN/Inf 발견 - 업데이트 건너뜀")
+                continue
+            
+            # 보상 정규화 (극단값 방지)
+            r = torch.clamp(r, -100.0, 50.0)  # 보상 범위 제한
 
             # 한 스텝 MDP이므로 y = r (부트스트랩 없음)
             with torch.no_grad():
@@ -862,12 +978,25 @@ class PIDGainSACAgent:
 
             # Critic 업데이트
             q1, q2 = self.critic(s, a)
+            
+            # Q 값 검증 (NaN/Inf 체크)
+            if torch.isnan(q1).any() or torch.isnan(q2).any() or torch.isinf(q1).any() or torch.isinf(q2).any():
+                print(f"⚠️ [경고] Q 값에 NaN/Inf 발견 - Critic 업데이트 건너뜀")
+                continue
+            
             q_loss = F.mse_loss(q1, y) + F.mse_loss(q2, y)
+            
+            # Loss 검증 (NaN 체크)
+            if torch.isnan(q_loss) or torch.isinf(q_loss):
+                print(f"⚠️ [경고] Critic loss가 비정상입니다: {q_loss.item()}")
+                continue  # 이 업데이트 건너뛰기
+            
             self.critic_opt.zero_grad()
             q_loss.backward()
-            nn.utils.clip_grad_norm_(
-                self.critic.parameters(), 5.0
-            )  # Gradient clipping 증가
+            # Gradient clipping: 1.0 → 2.0 (균형잡힌 학습)
+            critic_grad_norm = nn.utils.clip_grad_norm_(
+                self.critic.parameters(), 2.0
+            )
             self.critic_opt.step()
 
             # Actor 업데이트
@@ -875,11 +1004,18 @@ class PIDGainSACAgent:
             q1_pi, q2_pi = self.critic(s, pi)
             min_q_pi = torch.min(q1_pi, q2_pi)
             pi_loss = ((self.alpha * logp) - min_q_pi).mean()
+            
+            # Loss 검증 (NaN 체크)
+            if torch.isnan(pi_loss) or torch.isinf(pi_loss):
+                print(f"⚠️ [경고] Actor loss가 비정상입니다: {pi_loss.item()}")
+                continue  # 이 업데이트 건너뛰기
+            
             self.actor_opt.zero_grad()
             pi_loss.backward()
-            nn.utils.clip_grad_norm_(
-                self.actor.parameters(), 5.0
-            )  # Gradient clipping 증가
+            # Gradient clipping: 1.0 → 2.0 (균형잡힌 학습)
+            actor_grad_norm = nn.utils.clip_grad_norm_(
+                self.actor.parameters(), 2.0
+            )
             self.actor_opt.step()
 
             # 엔트로피 자동 조절
@@ -913,10 +1049,76 @@ class PIDGainSACAgent:
                 "critic_opt": self.critic_opt.state_dict(),
                 "total_steps": self.total_steps,
                 "episode_rewards": self.episode_rewards,
+                "cfg": self.cfg,  # 설정 정보도 저장
             },
             path,
         )
         print(f"💾 Saved: {path}")
+
+    def load_model(self, path, strict=True):
+        """
+        모델 로드 및 전이학습 설정
+        Args:
+            path: 모델 파일 경로
+            strict: True면 완전 일치 필요, False면 부분 로드 허용
+        """
+        if not os.path.exists(path):
+            print(f"⚠️ 모델 파일이 존재하지 않음: {path}")
+            return False
+            
+        try:
+            checkpoint = torch.load(path, map_location=self.device)
+            
+            # Actor 로드
+            self.actor.load_state_dict(checkpoint["actor"], strict=strict)
+            
+            # Critic 로드
+            self.critic.load_state_dict(checkpoint["critic"], strict=strict)
+            self.critic_target.load_state_dict(checkpoint["critic_target"], strict=strict)
+            
+            # Optimizer 로드 (선택적)
+            if "actor_opt" in checkpoint:
+                self.actor_opt.load_state_dict(checkpoint["actor_opt"])
+            if "critic_opt" in checkpoint:
+                self.critic_opt.load_state_dict(checkpoint["critic_opt"])
+                
+            # 학습 진행 상황 로드 (선택적)
+            if "total_steps" in checkpoint:
+                self.total_steps = checkpoint["total_steps"]
+            if "episode_rewards" in checkpoint:
+                self.episode_rewards = checkpoint["episode_rewards"]
+                
+            print(f"✅ 모델 로드 완료: {path}")
+            print(f"📊 로드된 정보: total_steps={self.total_steps}, episodes={len(self.episode_rewards)}")
+            return True
+            
+        except Exception as e:
+            print(f"❌ 모델 로드 실패: {e}")
+            return False
+
+    def transfer_learning_setup(self, source_model_path, learning_rate_scale=0.1):
+        """
+        전이학습 설정
+        Args:
+            source_model_path: 소스 모델 경로
+            learning_rate_scale: 학습률 스케일링 (0.1 = 기존의 10%)
+        """
+        if not self.load_model(source_model_path, strict=False):
+            print("⚠️ 전이학습 실패: 소스 모델 로드 불가")
+            return False
+            
+        # 학습률 조정 (전이학습 시 더 낮은 학습률 사용)
+        original_lr = self.cfg["LR"]
+        new_lr = original_lr * learning_rate_scale
+        
+        for param_group in self.actor_opt.param_groups:
+            param_group['lr'] = new_lr
+        for param_group in self.critic_opt.param_groups:
+            param_group['lr'] = new_lr
+            
+        print(f"🔄 전이학습 설정 완료")
+        print(f"📈 학습률 조정: {original_lr:.2e} → {new_lr:.2e} (x{learning_rate_scale})")
+        return True
 
 # =========================
 # TCP Communicator
@@ -1457,9 +1659,22 @@ class PIDGainOptimizationEnvironment:
         S_bandq = float(np.mean(margin)) if n_samples > 0 else 0.0
         S_nosat = float(1.0 - sat_ratio)
 
-        # overshoot 제곱 페널티 (비선형 증가로 큰 오버슈트 강력 억제)
-        # 10% → 0.01, 30% → 0.09, 50% → 0.25
-        P_overshoot = overshoot_pct ** 2
+        # 🎯 점진적 오버슈트 페널티 (3단계)
+        overshoot_pct_abs = overshoot_pct * 100.0  # % 단위로 변환
+        
+        if overshoot_pct_abs <= Constants.OVERSHOOT_THRESHOLD_MILD:
+            # 5% 이하: 경미 - 선형 페널티 (거의 무시)
+            P_overshoot = (overshoot_pct_abs / Constants.OVERSHOOT_THRESHOLD_MILD) * 0.1
+        elif overshoot_pct_abs <= Constants.OVERSHOOT_THRESHOLD_MODERATE:
+            # 5~15%: 보통 - 제곱 페널티
+            normalized = (overshoot_pct_abs - Constants.OVERSHOOT_THRESHOLD_MILD) / \
+                        (Constants.OVERSHOOT_THRESHOLD_MODERATE - Constants.OVERSHOOT_THRESHOLD_MILD)
+            P_overshoot = 0.1 + (normalized ** 2) * 0.4  # 0.1 ~ 0.5
+        else:
+            # 15% 이상: 심각 - 3차 페널티 (급격히 증가)
+            normalized = min(1.0, (overshoot_pct_abs - Constants.OVERSHOOT_THRESHOLD_MODERATE) / \
+                           (Constants.OVERSHOOT_THRESHOLD_SEVERE - Constants.OVERSHOOT_THRESHOLD_MODERATE))
+            P_overshoot = 0.5 + (normalized ** 3) * 0.5  # 0.5 ~ 1.0
 
         # ----- 추종 실패 페널티 (연속형) -----
         # 1. RMSE 기반: 큰 오차가 지속되면 추종 실패
@@ -1517,6 +1732,20 @@ class PIDGainOptimizationEnvironment:
             "band_time": band_ratio * episode_len_s,
             "out_of_band_time": (1.0 - band_ratio) * episode_len_s,
         }
+        
+        # 🔍 보상 및 메트릭 검증 (NaN/Inf 체크)
+        if np.isnan(reward) or np.isinf(reward):
+            print(f"❌ [오류] calculate_episode_reward에서 NaN/Inf 보상 발견!")
+            print(f"   reward: {reward}, rmse: {rmse}, overshoot: {overshoot_pct}")
+            print(f"   force_array min/max: {np.min(force_array):.2f}/{np.max(force_array):.2f}")
+            reward = 0.0  # 안전한 기본값
+            print(f"   → 보상을 0.0으로 대체")
+        
+        # 메트릭도 검증
+        for key, val in metrics.items():
+            if np.isnan(val) or np.isinf(val):
+                print(f"❌ [오류] 메트릭 '{key}'에 NaN/Inf 발견: {val}")
+                metrics[key] = 0.0 if key != "settling_time" else episode_len_s
 
         return reward, metrics
 
@@ -1695,16 +1924,16 @@ class PIDGainOptimizationEnvironment:
                 )
             else:
                 # 첫 에피소드: 기준 PID gain으로 상태 추정
-                print("🆕 첫 에피소드 - 기준 PID (65, 90, 0)로 상태 추정")
-                base_pid = np.array([65.0, 90.0, 0.0], dtype=np.float32)
+                print("🆕 첫 에피소드 - 기준 PID (40, 50, 0)로 상태 추정")
+                base_pid = np.array([40.0, 50.0, 0.0], dtype=np.float32)
                 initial_state = create_initial_state(
                     [], self.cfg["TARGET_FORCE"], base_pid, None, self.cfg["RECV_INTERVAL_SEC"]
                 )
 
             # 2. PID gain 사용 및 에피소드 시작 신호 전송
             if ep == 0:
-                # 첫 에피소드: 로봇제어PC 자체 PID 사용 (P=65, I=90, D=0)
-                pid_gains = np.array([65.0, 90.0, 0.0], dtype=np.float32)
+                # 첫 에피소드: 로봇제어PC 자체 PID 사용 (P=40, I=50, D=0)
+                pid_gains = np.array([40.0, 50.0, 0.0], dtype=np.float32)
                 print(
                     f"🎯 [에피소드 1] 로봇제어PC 자체 PID 사용: Kp={pid_gains[0]:.0f}, Ki={pid_gains[1]:.0f}, Kd={pid_gains[2]:.0f}"
                 )
@@ -1727,7 +1956,7 @@ class PIDGainOptimizationEnvironment:
                 self.comm.send_pid_once(
                     pid_gains[0],
                     pid_gains[1],
-                    pid_gains[2],
+                    0.0,  # 하드웨어에는 항상 D=0.0 전송 (미분 작용 비활성화)
                     timing_accurate=True,
                     episode_done=False,
                     learning_done=False,
@@ -1870,7 +2099,7 @@ class PIDGainOptimizationEnvironment:
                     self.comm.send_pid_once(
                         next_pid_for_reset[0],  # ✅ 다음 에피소드 PID 전송
                         next_pid_for_reset[1],
-                        next_pid_for_reset[2],
+                        0.0,  # 하드웨어에는 항상 D=0.0 전송
                         timing_accurate=False,
                         episode_done=True,  # 에피소드 종료 신호
                         learning_done=False,
@@ -2066,28 +2295,46 @@ class PIDGainOptimizationEnvironment:
                     f"💾 [저장] 최고 성능 에이전트 저장: 에피소드 {ep+1}, 보상 {best_reward:.2f}"
                 )
 
-            # 8. 학습 (모든 에피소드에서 시도, replay buffer에 2개 미만이면 자동 건너뜀)
+            # 8. 학습 (안정적 gradient 추정을 위한 최소 버퍼 크기 보장)
             # 중요: 학습을 먼저 수행한 후 다음 PID를 계산해야 학습된 네트워크 사용!
-            # 동적 업데이트 횟수 조정 (과적합 방지)
             buffer_size = len(self.agent.replay)
-            if buffer_size >= 2:
-                # 배치 크기는 자동으로 replay buffer 크기에 맞춰 조정됨
-                max_updates = min(
-                    self.cfg["UPDATES_PER_EPISODE"], max(1, buffer_size // 2)
-                )  # 최소 2개씩 샘플링
-                actual_updates = max(1, max_updates)
+            
+            # 최소 버퍼 크기 체크 (안정적 학습 보장)
+            if buffer_size >= Constants.MIN_BUFFER_FOR_LEARNING:
+                # 고정된 업데이트 횟수 사용 (안정적 학습)
+                actual_updates = self.cfg["UPDATES_PER_EPISODE"]
+                
+                # 배치 크기: 안정적 학습을 위한 조정
+                effective_batch_size = min(
+                    self.cfg["BATCH_SIZE"],  # 최대 128
+                    max(Constants.MIN_BATCH_SIZE, buffer_size // 2)  # 버퍼의 절반 사용
+                )
+                
                 print(
-                    f"🧠 [학습] 강화학습 업데이트 중... (에피소드 {ep+1}, {actual_updates}회, 배치크기: {min(128, buffer_size)})"
+                    f"🧠 [학습] 강화학습 업데이트 중... (에피소드 {ep+1}, {actual_updates}회, "
+                    f"배치크기: {effective_batch_size}, 버퍼: {buffer_size}개)"
                 )
+                
                 self.agent.update_parameters_one_step(
-                    None, actual_updates  # None이면 동적 배치 크기 사용
+                    effective_batch_size, actual_updates
                 )
+                
                 print(
                     f"✅ [학습] 신경망 업데이트 완료! 다음 에피소드는 학습된 네트워크 사용"
                 )
+                self._log(
+                    "INFO", 
+                    f"🧠 학습 완료: {actual_updates}회 업데이트, 배치={effective_batch_size}"
+                )
             else:
+                # 초기 탐색 단계 (학습 없이 데이터만 수집)
                 print(
-                    f"📊 [에피소드 {ep+1}] 데이터 수집 완료 (학습 건너뜀: replay buffer={buffer_size}개, 최소 2개 필요)"
+                    f"📊 [에피소드 {ep+1}] 초기 탐색 중... (버퍼: {buffer_size}/{Constants.MIN_BUFFER_FOR_LEARNING}개, "
+                    f"학습 시작까지 {Constants.MIN_BUFFER_FOR_LEARNING - buffer_size}개 필요)"
+                )
+                self._log(
+                    "INFO",
+                    f"📊 초기 탐색: 버퍼 {buffer_size}/{Constants.MIN_BUFFER_FOR_LEARNING}개"
                 )
 
             # 9. 로깅 (상세)
@@ -2188,7 +2435,7 @@ class PIDGainOptimizationEnvironment:
                 # ✅ 저장된 값 전송
                 self.pid_gains_next[0],
                 self.pid_gains_next[1],
-                self.pid_gains_next[2],
+                0.0,  # 하드웨어에는 항상 D=0.0 전송
                 timing_accurate=True,
                 episode_done=True,
                 learning_done=False,
