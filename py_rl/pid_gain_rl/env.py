@@ -87,34 +87,37 @@ class PIDGainOptimizationEnvironment:
         self, force_data, pi_output_data, target_force=None, episode_len_s=None
     ):
         """
-        연속형 지수 스코어 + PBRS 기반 보상 함수 (최종 범위: [-1.0, 1.0])
-        - 스코어(0~1): S_ts(정착시간), S_mp(오버슈트%), S_ess(정상상태오차), S_band(밴드유지율), S_u(입력RMS)
-        - 실패 페널티: P_fail (0~1)
-        - PBRS(progress): 잠재함수 개선분(>0만 반영)
-        - reward_score = Σ w_i*S_i - w_fail*P_fail + w_pbrs*progress ∈ [0,1]
-        - 최종 보상: reward = 2*reward_score - 1 ∈ [-1,1]
-        - 안전 위반 시: reward = -1.0 (Constants.SAFETY_FORCE_PENALTY)
-
+        연속형 지수 스코어 + PBRS + 기준선 중심화 + tanh 소프트클립
+        최종 범위: [-1.0, 1.0], 개선/악화 신호 강화
+        
+        주요 특징:
+        1. 단위 일관성: overshoot % 단위로만 사용
+        2. 안전 위반: 하드 패널티 (-1.0)
+        3. EWMA 기준선: 지속적 개선 신호 제공 (보상 중심화)
+        4. tanh 소프트클립: 그라디언트 소멸 방지
+        5. 범위: [-1, 1] (SAC 학습에 최적화)
+        
         Args:
-            force_data: 에피소드 동안의 힘 데이터 리스트
-            pi_output_data: 에피소드 동안의 PI 출력 데이터 리스트
-            target_force: 목표 힘 (None이면 설정에서 가져옴)
-            episode_len_s: 에피소드 길이 (None이면 설정에서 가져옴)
+            force_data: 에피소드 힘 데이터
+            pi_output_data: PI 출력 데이터
+            target_force: 목표 힘 (기본값: cfg)
+            episode_len_s: 에피소드 길이 (기본값: cfg)
+        
         Returns:
-            total_reward: 에피소드 총보상 ([-1, 1])
+            reward: [-1.0, 1.0] 범위 보상
             metrics: 성능 지표 딕셔너리
         """
-        # 힘 데이터가 비어 있으면 보상 0과 빈 메트릭스 반환
+        import numpy as np
+
+        # ========== 1. 입력 검증 및 기본값 ==========
         if not force_data:
             return 0.0, {}
-
-        # ----- 동적 설정값 가져오기 -----
+        
         if target_force is None:
             target_force = self.cfg["TARGET_FORCE"]
         if episode_len_s is None:
             episode_len_s = self.cfg["EPISODE_SECONDS"]
 
-        # ----- 데이터/기본값 -----
         force_array = np.array(force_data, dtype=np.float64)
         n_samples = len(force_array)
         fs_hz = n_samples / max(episode_len_s, 1e-6)
@@ -122,29 +125,33 @@ class PIDGainOptimizationEnvironment:
         errors = force_array - target_force
         T_abs = max(abs(target_force), 1.0)
 
-        # ----- 핵심 지표 -----
-        rmse = float(np.sqrt(np.mean(errors**2))) # 전체 오차 크기
+        # ========== 2. 핵심 지표 계산 ==========
+        
+        # RMSE (전체 추종 오차)
+        rmse = float(np.sqrt(np.mean(errors**2)))
 
-        # 음수 타깃(-) 오버슈트: 더 음수(min)로 내려가면 overshoot
+        # Overshoot (% 단위로 일관화)
         if target_force < 0:
             extreme_force = float(np.min(force_array))
-            overshoot_pct = max(0.0, (target_force - extreme_force) / T_abs)
+            overshoot_ratio = max(0.0, (target_force - extreme_force) / T_abs)
         else:
             extreme_force = float(np.max(force_array))
-            overshoot_pct = max(0.0, (extreme_force - target_force) / T_abs)
+            overshoot_ratio = max(0.0, (extreme_force - target_force) / T_abs)
+        
+        overshoot_pct = float(overshoot_ratio * 100.0)  # % 단위로 변환
 
-        # 밴드 유지율 (±1.5N)
+        # 밴드 유지율 (±BAND_TOLERANCE_N)
         tol_main = Constants.BAND_TOLERANCE_N
-        in_band = np.abs(errors) <= tol_main
-        band_ratio = float(np.mean(in_band)) if n_samples > 0 else 0.0
+        band_ratio = float(np.mean(np.abs(errors) <= tol_main)) if n_samples > 0 else 0.0
 
-        # 정착시간: warmup 이후에만 체크
+        # 정착시간 (Settling Time) - warmup 후
         SHAPING_WARMUP_S = Constants.SHAPING_WARMUP_S
         start_idx = int(fs_hz * SHAPING_WARMUP_S)
         tol_settling = max(Constants.SETTLING_BAND_TOLERANCE, 0.01 * T_abs)
         hold_samples = int(fs_hz * Constants.SETTLING_HOLD_TIME_S)
         in_settling = np.abs(errors) <= tol_settling
-        settling_time_s = episode_len_s
+        
+        settling_time_s = episode_len_s  # 기본값: 전체 시간
         runlen = 0
         for k in range(start_idx, n_samples):
             if in_settling[k]:
@@ -155,130 +162,151 @@ class PIDGainOptimizationEnvironment:
             else:
                 runlen = 0
 
-        # 분산 계산
-        error_var = float(np.var(errors))
-        variance_n = float(min(1.0, error_var / (T_abs**2)))
-
-        # 제어신호 품질
-        u_rms_n = 0.0
-        du_rms_n = 0.0
-        sat_ratio = 0.0
-        if pi_output_data:
-            u = np.array(pi_output_data, dtype=np.float64)
-            u_max = Constants.PI_OUTPUT_MAX
-            if u_max <= 0:
-                u_max = 1.0
-            u_rms_n = float(np.sqrt(np.mean(u**2)) / u_max)
-            if len(u) > 1:
-                du = np.diff(u)
-                du_rms_n = float(np.sqrt(np.mean(du**2)) / u_max)
-            sat_threshold = Constants.PI_OUTPUT_SAT_THRESHOLD * u_max
-            sat_ratio = float(np.mean(np.abs(u) >= sat_threshold))
-
-        # ----- Potential-based shaping (개선분만) -----
-        abs_e = np.abs(errors)
-        skip = min(start_idx, len(abs_e))
-        abs_e_eff = abs_e[skip:] if skip < len(abs_e) else abs_e
-        progress = 0.0
-        if len(abs_e_eff) > 1:
-            phi = -abs_e_eff / T_abs
-            gamma = Constants.POTENTIAL_GAMMA
-            F = gamma * phi[1:] - phi[:-1]
-            progress = float(np.mean(np.clip(F, 0.0, None)))
-
-        # ----- 핵심 지표 기반 가중 보상 구성 -----
-        # 정상상태 오차(ess): 마지막 10% 구간 평균 오차
+        # 정상상태 오차 (ESS): 마지막 10% 구간
         if n_samples > 0:
             tail_len = max(1, int(n_samples * 0.1))
             ess = float(np.mean(errors[-tail_len:]))
         else:
             ess = 0.0
 
-        # 밴드 유지율(±1.5N)
-        margin = np.maximum(0.0, tol_main - np.abs(errors)) / max(tol_main, 1e-6)
-        band_ratio = float(np.mean(np.abs(errors) <= tol_main)) if n_samples > 0 else 0.0
+        # 제어 입력 품질 (u_rms 정규화)
+        u_rms_n = 0.0
+        if pi_output_data:
+            u = np.array(pi_output_data, dtype=np.float64)
+            u_max = Constants.PI_OUTPUT_MAX if Constants.PI_OUTPUT_MAX > 0 else 1.0
+            u_rms_n = float(np.sqrt(np.mean(u**2)) / u_max)
 
-        # 🎯 점진적 오버슈트 페널티 (3단계)
-        overshoot_pct_abs = overshoot_pct * 100.0  # % 단위로 변환
+        # ========== 3. PBRS (Potential-Based Reward Shaping) ==========
+        abs_e = np.abs(errors)
+        skip = min(start_idx, len(abs_e))
+        abs_e_eff = abs_e[skip:] if skip < len(abs_e) else abs_e
+        progress = 0.0
         
-        if overshoot_pct_abs <= Constants.OVERSHOOT_THRESHOLD_MILD:
-            # 5% 이하: 경미 - 선형 페널티 (거의 무시)
-            P_overshoot = (overshoot_pct_abs / Constants.OVERSHOOT_THRESHOLD_MILD) * 0.1
-        elif overshoot_pct_abs <= Constants.OVERSHOOT_THRESHOLD_MODERATE:
-            # 5~15%: 보통 - 제곱 페널티
-            normalized = (overshoot_pct_abs - Constants.OVERSHOOT_THRESHOLD_MILD) / \
-                        (Constants.OVERSHOOT_THRESHOLD_MODERATE - Constants.OVERSHOOT_THRESHOLD_MILD)
-            P_overshoot = 0.1 + (normalized ** 2) * 0.4  # 0.1 ~ 0.5
-        else:
-            # 15% 이상: 심각 - 3차 페널티 (급격히 증가)
-            normalized = min(1.0, (overshoot_pct_abs - Constants.OVERSHOOT_THRESHOLD_MODERATE) / \
-                           (Constants.OVERSHOOT_THRESHOLD_SEVERE - Constants.OVERSHOOT_THRESHOLD_MODERATE))
-            P_overshoot = 0.5 + (normalized ** 3) * 0.5  # 0.5 ~ 1.0
+        if len(abs_e_eff) > 1:
+            phi = -abs_e_eff / T_abs                  # Potential 함수
+            gamma = Constants.POTENTIAL_GAMMA        # 0.99 권장
+            F = gamma * phi[1:] - phi[:-1]           # 개선분
+            progress = float(np.mean(np.clip(F, 0.0, None)))  # 양수만
 
-        # ----- 추종 실패 페널티 (연속형) -----
-        # 1. RMSE 기반: 큰 오차가 지속되면 추종 실패
-        rmse_fail_ratio = max(0.0, (rmse - Constants.TRACKING_FAIL_RMSE_THRESHOLD) / Constants.TRACKING_FAIL_RMSE_THRESHOLD)
-        rmse_fail_ratio = min(1.0, rmse_fail_ratio)  # 0~1 클립
+        # ========== 4. 추종 실패 패널티 (0~1) ==========
+        rmse_fail_ratio = max(0.0, (rmse - Constants.TRACKING_FAIL_RMSE_THRESHOLD) / 
+                          Constants.TRACKING_FAIL_RMSE_THRESHOLD)
+        rmse_fail_ratio = min(1.0, rmse_fail_ratio)
         
-        # 2. 밴드 체류율 기반: 밴드 밖에 오래 있으면 추종 실패
-        band_fail_ratio = max(0.0, (Constants.TRACKING_FAIL_BAND_RATIO - band_ratio) / Constants.TRACKING_FAIL_BAND_RATIO)
-        band_fail_ratio = min(1.0, band_fail_ratio)  # 0~1 클립
+        band_fail_ratio = max(0.0, (Constants.TRACKING_FAIL_BAND_RATIO - band_ratio) / 
+                          Constants.TRACKING_FAIL_BAND_RATIO)
+        band_fail_ratio = min(1.0, band_fail_ratio)
         
-        # 두 지표 중 더 나쁜 것을 페널티로 사용 (max)
-        P_tracking_fail = max(rmse_fail_ratio, band_fail_ratio)
+        P_fail = max(rmse_fail_ratio, band_fail_ratio)
 
-        # ----- 보상: 지수 스코어 + PBRS -----
-        # 스코어화(0~1)
-        S_ts   = float(np.exp(-float(settling_time_s) / max(Constants.SCORE_TAU_TS, 1e-6)))
-        S_mp   = float(np.exp(-(overshoot_pct_abs) / max(Constants.SCORE_TAU_MP_PERCENT, 1e-6)))  # overshoot in %
-        S_ess  = float(np.exp(-abs(ess) / max(Constants.SCORE_TAU_ESS_N, 1e-6)))
+        # ========== 5. 연속형 스코어 (0~1) ==========
+        tau_settle = max(Constants.SCORE_TAU_TS, 1e-6)
+        tau_mp = max(Constants.SCORE_TAU_MP_PERCENT, 1e-6)
+        tau_ess = max(Constants.SCORE_TAU_ESS_N, 1e-6)
+        tau_u = max(Constants.SCORE_TAU_U, 1e-6)
+
+        S_ts   = float(np.exp(-float(settling_time_s) / tau_settle))
+        S_mp   = float(np.exp(-float(overshoot_pct) / tau_mp))
+        S_ess  = float(np.exp(-abs(ess) / tau_ess))
         S_band = float(band_ratio)
-        S_u    = float(np.exp(-float(u_rms_n) / max(Constants.SCORE_TAU_U, 1e-6)))
-        P_fail = P_tracking_fail
+        S_u    = float(np.exp(-float(u_rms_n) / tau_u))
 
-        W_PBRS = Constants.SCORE_W_PBRS
+        # ========== 6. 🎯 기준선 대비 개선량 (EWMA) ==========
+        # 첫 호출 시 초기화
+        if not hasattr(self, "_baseline"):
+            self._baseline = {
+                "ts": settling_time_s,
+                "mp": overshoot_pct,
+                "ess_abs": abs(ess),
+                "initialized": False,
+            }
+        
+        # 개선량 계산 (첫 에피소드는 0, 이후부터 유효)
+        if self._baseline["initialized"]:
+            I_ts  = float(np.clip((self._baseline["ts"] - settling_time_s) / tau_settle, -1.0, 1.0))
+            I_mp  = float(np.clip((self._baseline["mp"] - overshoot_pct) / tau_mp, -1.0, 1.0))
+            I_ess = float(np.clip((self._baseline["ess_abs"] - abs(ess)) / tau_ess, -1.0, 1.0))
+            
+            # 가중 평균 (정착시간 40%, 오버슈트 30%, ESS 30%)
+            I_improve = 0.4 * I_ts + 0.3 * I_mp + 0.3 * I_ess
+        else:
+            I_improve = 0.0
+            self._baseline["initialized"] = True  # 다음 에피소드부터 활성화
+
+        # EWMA 업데이트 (α=0.1: 최근 10개 에피소드 가중평균)
+        alpha = 0.1
+        self._baseline["ts"] = (1.0 - alpha) * self._baseline["ts"] + alpha * settling_time_s
+        self._baseline["mp"] = (1.0 - alpha) * self._baseline["mp"] + alpha * overshoot_pct
+        self._baseline["ess_abs"] = (1.0 - alpha) * self._baseline["ess_abs"] + alpha * abs(ess)
+
+        # ========== 7. 통합 보상 스코어 (0~1) ==========
+        W_PBRS = Constants.SCORE_W_PBRS  # 0.10
+        W_IMPR = 0.10  # 개선량 가중치
+        
         reward_score = (
-            Constants.SCORE_W_TS * S_ts
-            + Constants.SCORE_W_MP * S_mp
-            + Constants.SCORE_W_ESS * S_ess
-            + Constants.SCORE_W_BAND * S_band
-            + Constants.SCORE_W_U * S_u
-            - Constants.SCORE_W_FAIL * P_fail
-            + W_PBRS * progress
+            Constants.SCORE_W_TS * S_ts +       # 0.30: 정착시간
+            Constants.SCORE_W_MP * S_mp +       # 0.25: 오버슈트
+            Constants.SCORE_W_ESS * S_ess +     # 0.20: 정상상태 오차
+            Constants.SCORE_W_BAND * S_band +   # 0.15: 밴드 유지
+            Constants.SCORE_W_U * S_u -         # 0.05: 제어 노력
+            Constants.SCORE_W_FAIL * P_fail +   # -0.15: 추종 실패
+            W_PBRS * progress +                 # +0.10: 순간 개선 (PBRS)
+            W_IMPR * I_improve                  # +0.10: 기준선 대비 개선
         )
 
-        # 안전 위반 시 큰 페널티
-        if abs(extreme_force) > Constants.SAFETY_FORCE_LIMIT:
-            reward = -1.0  # [-1,1] 스케일: 최대 패널티
-            print(
-                f"⚠️ [안전 위반] 극한 힘: {extreme_force:.1f}N (절댓값 > {Constants.SAFETY_FORCE_LIMIT}N)"
-            )
-        else:
-            # 최종 보상: [0,1] → [-1,1] 중앙정규화 후 약한 클립
-            reward = float(np.clip(2.0 * reward_score - 1.0, -1.0, 1.0))
+        # ========== 8. 🔥 중심화 + tanh 소프트클립 [-1,1] ==========
+        beta = 0.99  # 느리게 추적 (최근 100 에피소드 가중평균)
+        if not hasattr(self, "_rew_baseline"):
+            self._rew_baseline = 0.5  # 초기값 (중립)
+        
+        # 보상 기준선 업데이트 (EWMA)
+        self._rew_baseline = beta * self._rew_baseline + (1.0 - beta) * reward_score
+        
+        # 기준선 중심화
+        r_centered = reward_score - self._rew_baseline
+        
+        # tanh 소프트클립 (gain으로 민감도 조절)
+        gain = 2.0  # 민감도 조절 (1.5~3.0 튜닝 가능)
+        reward = float(np.tanh(gain * r_centered))
 
-        # ----- 메트릭 (실제 사용되는 필수 지표만) -----
+        # ========== 9. 안전 위반 하드 패널티 ==========
+        if abs(extreme_force) > Constants.SAFETY_FORCE_LIMIT:
+            reward = Constants.SAFETY_FORCE_PENALTY  # -1.0
+            print(
+                f"⚠️ [안전 위반] 극한 힘: {extreme_force:.1f}N "
+                f"(한계: ±{Constants.SAFETY_FORCE_LIMIT}N)"
+            )
+
+        # ========== 10. 메트릭 반환 ==========
         metrics = {
             # 기본 지표 (CSV 저장 및 로그 출력용)
             "rmse": rmse,
-            "overshoot": overshoot_pct * 100.0,
+            "overshoot": overshoot_pct,  # % 단위로 일관화
             "settling_time": settling_time_s,
             "band_time": band_ratio * episode_len_s,
             "out_of_band_time": (1.0 - band_ratio) * episode_len_s,
+            
+            # 🔍 디버깅용 추가 정보
+            "reward_score": reward_score,      # [0,1] 스코어
+            "r_centered": r_centered,          # 중심화된 값
+            "r_baseline": self._rew_baseline,  # 보상 기준선
+            "progress": progress,              # PBRS 개선분
+            "I_improve": I_improve,            # 기준선 대비 개선량
+            "baseline_ts": self._baseline["ts"],
+            "baseline_mp": self._baseline["mp"],
+            "baseline_ess": self._baseline["ess_abs"],
         }
-        
-        # 🔍 보상 및 메트릭 검증 (NaN/Inf 체크)
+
+        # ========== 11. NaN/Inf 안전 가드 ==========
         if np.isnan(reward) or np.isinf(reward):
-            print(f"❌ [오류] calculate_episode_reward에서 NaN/Inf 보상 발견!")
-            print(f"   reward: {reward}, rmse: {rmse}, overshoot: {overshoot_pct}")
-            print(f"   force_array min/max: {np.min(force_array):.2f}/{np.max(force_array):.2f}")
-            reward = 0.0  # 안전한 기본값
-            print(f"   → 보상을 0.0으로 대체")
+            print(f"❌ [오류] NaN/Inf 보상 발견! → 0.0으로 대체")
+            print(f"   force 범위: [{np.min(force_array):.2f}, {np.max(force_array):.2f}]")
+            print(f"   reward_score: {reward_score:.4f}, r_centered: {r_centered:.4f}")
+            reward = 0.0
         
-        # 메트릭도 검증
-        for key, val in metrics.items():
+        for key, val in list(metrics.items()):
             if np.isnan(val) or np.isinf(val):
-                print(f"❌ [오류] 메트릭 '{key}'에 NaN/Inf 발견: {val}")
+                print(f"❌ [오류] 메트릭 '{key}' NaN/Inf: {val} → 기본값 대체")
                 metrics[key] = 0.0 if key != "settling_time" else episode_len_s
 
         return reward, metrics
