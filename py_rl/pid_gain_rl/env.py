@@ -19,19 +19,29 @@ from .agent import PIDGainSACAgent
 from .comm import PIDGainCommunicator
 from .monitor import RLRealtimeMonitor
 
-class PIDGainOptimizationEnvironment:
+class PIDGainEnvironment:
     """
     PID Gain 최적화 환경
-    - 에피소드 실행 및 관리
-    - 보상 계산 (연속형 지수 스코어 기반)
-    - 제어공학 지표 계산 및 저장 (논문용 10개 핵심 지표)
-    - 데이터 수집 및 저장
-    - 학습 진행 모니터링
+    - 🆕 세그먼트 분할 학습 (1 에피소드 = 5 transition)
+    - 🆕 20차원 상태 공간 (12 + 8)
     """
 
     def __init__(self, cfg=None):
         if cfg is None:
             raise ValueError("cfg 파라미터가 필요합니다")
+        
+        # 🔥 STATE_DIM 동적 계산 및 강제 설정
+        base_dim = 12  # 로봇PC 6 + 강화학습PC 
+        trajectory_dim = 8  # 궤적 요약 8차원
+        cfg["STATE_DIM"] = base_dim + trajectory_dim  # 20차원 강제 설정
+        
+        print(f"✅ [Env] STATE_DIM 자동 설정: {cfg['STATE_DIM']}차원 "
+              f"(기존 {base_dim} + 궤적 {trajectory_dim})")
+        print(f"✅ [Env] 세그먼트 분할: {Constants.NUM_SEGMENTS}개 "
+              f"({Constants.SEGMENT_LENGTH_S}초씩)")
+        print(f"✅ [Env] Fine-tuning: alpha={Constants.ACTOR_INITIAL_ALPHA}, "
+              f"log_std_max={Constants.ACTOR_LOG_STD_MAX}")
+        
         self.cfg = cfg
         self.agent = PIDGainSACAgent(cfg)
         self.comm = PIDGainCommunicator(
@@ -671,9 +681,13 @@ class PIDGainOptimizationEnvironment:
                     episode_stats.append({
                         "episode": ep + 1,
                         "reward": safety_violation_reward,
-                        "rmse": 9999.0,  # 실패 표시
-                        "overshoot": 100.0,
-                        "settling_time": self.cfg["EPISODE_SECONDS"],
+                        "metrics": {
+                            "rmse": 999.0,
+                            "overshoot": 100.0,
+                            "settling_time": self.cfg["EPISODE_SECONDS"],
+                            "band_time": 0.0,
+                            "out_of_band_time": self.cfg["EPISODE_SECONDS"],
+                        },
                         "pid_gains": pid_gains.copy(),
                         "duration": time.perf_counter() - start_time,
                         "safety_violation": True,
@@ -687,15 +701,15 @@ class PIDGainOptimizationEnvironment:
                     reset_wait_start = time.perf_counter()
                     
                     while (time.perf_counter() - reset_wait_start) < 2.0:
-                        # 계속 데이터 받아서 모니터에 전송
-                        reset_state, _ = self.comm.get_latest_state()
-                        if reset_state is not None:
+                        # 계속 데이터 받아서 모니터에 전송 (
+                        state, _ = self.comm.get_latest_state()
+                        if state is not None:
                             now = time.perf_counter()
                             if now - last_monitor_sent >= 0.1:  # 10 Hz
                                 t_global = now - training_start_time
                                 monitor.post_force(
                                     t_global,
-                                    float(abs(reset_state[0])),
+                                    float(abs(state[0])),
                                     float(abs(self.cfg["TARGET_FORCE"])),
                                 )
                                 last_monitor_sent = now
@@ -783,13 +797,23 @@ class PIDGainOptimizationEnvironment:
             
             if safety_violated:
                 print("⏭️  안전 위반으로 인한 조기 종료 - 최소 학습 후 다음 에피소드로 이동")
-                self._log("WARNING", f"에피소드 {ep+1}: 안전 위반 - 최소 transition 저장 및 1회 학습 수행")
+                self._log("WARNING", f"에피소드 {ep+1} 안전 위반으로 조기 종료")
 
-                # 안전 위반 보상으로 transition 저장
+                # 안전 위반 보상으로 transition 저장 (20차원 상태)
                 bad_reward = episode_stats[-1]["reward"] if episode_stats else Constants.SAFETY_FORCE_PENALTY
-                final_state_violation = np.zeros(self.cfg["STATE_DIM"], dtype=np.float32)
+                final_state_violation = np.zeros(20, dtype=np.float32)  # 🔥 20차원 고정
+                
+                # actual_initial_state가 12차원이면 20차원으로 확장
+                if actual_initial_state.shape[0] == 12:
+                    actual_initial_state_20d = np.concatenate([
+                        actual_initial_state,
+                        np.zeros(8, dtype=np.float32)
+                    ])
+                else:
+                    actual_initial_state_20d = actual_initial_state
+                
                 self.agent.store_transition(
-                    actual_initial_state,
+                    actual_initial_state_20d,
                     pid_gains,
                     bad_reward,
                     final_state_violation,
@@ -801,59 +825,122 @@ class PIDGainOptimizationEnvironment:
                         batch_size=min(self.cfg["BATCH_SIZE"], len(self.agent.replay)),
                         num_updates=1,
                     )
-                # 다음 PID는 이미 안전 위반 처리 중에 설정됨 (self.pid_gains_next)
-                continue  # 현재 에피소드 처리 종료, 다음 에피소드로
+                continue  # 다음 에피소드로
             
-            # 5. 에피소드 총보상 계산 (정상 종료 시에만)
-            episode_reward, metrics = self.calculate_episode_reward(
-                self.episode_force_data,
-                self.episode_pi_output_data,
-                self.cfg["TARGET_FORCE"],
-                self.cfg["EPISODE_SECONDS"],
-            )
-            print(
-                f"🏆 [결과] 보상: {episode_reward:.2f}, RMSE: {metrics['rmse']:.2f}, 오버슈트: {metrics['overshoot']:.1f}%"
-            )
-
-            # =========================
-            # [C] 에피소드 종료 시: reward 점 업데이트 (한 번)
-            # =========================
-            monitor.post_reward(ep + 1, float(episode_reward))
-
-            # 6. Transition 저장 (한 스텝 MDP) - 실제 관측된 초기 상태 및 최종 상태 사용
-            # 최종 상태: 에피소드 결과를 반영한 상태
-            if len(self.episode_force_data) > 0:
-                final_state = create_initial_state(
-                    self.episode_force_data,
-                    self.cfg["TARGET_FORCE"],
+            # ========== 🔥 세그먼트 분할 처리 (라인 1005 대체) ==========
+            
+            force_data = self.episode_force_data
+            pi_output_data = self.episode_pi_output_data
+            
+            if not force_data:
+                print("❌ 데이터 수집 실패 - 다음 에피소드로")
+                continue
+            
+            # 세그먼트 분할
+            num_segments = Constants.NUM_SEGMENTS  # 5
+            total_samples = len(force_data)
+            segment_len = total_samples // num_segments
+            
+            segments_data = []
+            
+            for i in range(num_segments):
+                start_idx = i * segment_len
+                end_idx = (i + 1) * segment_len if i < num_segments - 1 else total_samples
+                
+                seg_force = force_data[start_idx:end_idx]
+                seg_pi = pi_output_data[start_idx:end_idx] if pi_output_data else []
+                seg_len_s = len(seg_force) / (total_samples / self.cfg["EPISODE_SECONDS"])
+                
+                # 세그먼트 보상 계산
+                seg_reward, seg_metrics = self.calculate_episode_reward(
+                    seg_force, seg_pi, self.cfg["TARGET_FORCE"], seg_len_s
+                )
+                
+                # 세그먼트 상태 생성 (20차원)
+                seg_state = self._build_segment_state(
+                    prev_pid_gains=pid_gains,
+                    prev_reward=seg_reward,
+                    force_segment=seg_force,
+                    target_force=self.cfg["TARGET_FORCE"],
+                    segment_len_s=seg_len_s,
+                )
+                
+                segments_data.append({
+                    "state": seg_state,
+                    "reward": seg_reward,
+                    "metrics": seg_metrics,
+                    "segment_idx": i,
+                })
+            
+            # 리플레이 버퍼에 세그먼트별 저장
+            for i, seg in enumerate(segments_data):
+                if i == 0:
+                    # 첫 세그먼트: 에피소드 초기 상태 사용 (20차원으로 변환)
+                    if actual_initial_state.shape[0] == 12:
+                        # 12차원이면 20차원으로 확장 (제로 패딩)
+                        current_state = np.concatenate([
+                            actual_initial_state,
+                            np.zeros(8, dtype=np.float32)
+                        ])
+                    else:
+                        current_state = actual_initial_state
+                else:
+                    current_state = segments_data[i-1]["state"]
+                
+                if i < num_segments - 1:
+                    next_state = segments_data[i+1]["state"]
+                    done = False
+                else:
+                    next_state = np.zeros_like(seg["state"])
+                    done = True
+                
+                self.agent.store_transition(
+                    current_state,
                     pid_gains,
-                    self.episode_history,
-                    self.cfg["RECV_INTERVAL_SEC"],
-                )
-            else:
-                final_state = np.zeros(
-                    self.cfg["STATE_DIM"], dtype=np.float32
+                    seg["reward"],
+                    next_state,
+                    done,
                 )
             
-            self.agent.store_transition(
-                actual_initial_state,
-                pid_gains,
-                episode_reward,
-                final_state,
-                True,
+            # 전체 보상 (평균)
+            total_reward = np.mean([s["reward"] for s in segments_data])
+            
+            # 최종 메트릭 (전체 에피소드 기준)
+            _, final_metrics = self.calculate_episode_reward(
+                force_data, pi_output_data, 
+                self.cfg["TARGET_FORCE"], self.cfg["EPISODE_SECONDS"]
             )
+            
+            # 표준편차 Annealing 업데이트
+            self.agent.update_std_scale(ep)
+            
+            # 로그 출력
+            seg_rewards_str = ", ".join([f"{s['reward']:.3f}" for s in segments_data])
+            print(
+                f"📊 세그먼트별 보상: [{seg_rewards_str}], "
+                f"평균: {total_reward:.3f}, "
+                f"std_scale: {self.agent.std_scale:.3f}"
+            )
+            self._log("INFO", 
+                f"📊 세그먼트별 보상: [{seg_rewards_str}], 평균: {total_reward:.3f}"
+            )
+            
+            # ========== 기존 로직 재개 (라인 1010~) ==========
+            
+            # 모니터 업데이트 (total_reward 사용)
+            monitor.post_reward(ep + 1, float(total_reward))
 
-            # 7. 통계 업데이트 (학습 전에 먼저 업데이트)
+            # 통계 업데이트
             episode_duration = time.perf_counter() - start_time
             episode_stat = {
                 "episode": ep + 1,
                 "duration": episode_duration,
                 "pid_gains": pid_gains.copy(),
-                "reward": episode_reward,
-                "metrics": metrics,
+                "reward": total_reward,  # 🔥 세그먼트 평균 보상
+                "metrics": final_metrics,
             }
             episode_stats.append(episode_stat)
-            self.agent.episode_rewards.append(episode_reward)
+            self.agent.episode_rewards.append(total_reward)
 
             # RewardBreakdownLogger 플러시 (에피소드 경계에서) - 그래프 생성은 최종에만
             if hasattr(self, "rlogger"):
@@ -864,8 +951,8 @@ class PIDGainOptimizationEnvironment:
                 )
 
             # 최고 성능 PID gain 저장 (동일 점수도 저장)
-            if episode_reward >= best_reward:
-                best_reward = episode_reward
+            if total_reward >= best_reward:
+                best_reward = total_reward
                 best_pid_gains = pid_gains.copy()
                 self.agent.save_model(
                     f"{model_save_dir}/best_pid_agent_episode_{ep+1}_reward_{best_reward:.2f}.pth"
@@ -919,11 +1006,11 @@ class PIDGainOptimizationEnvironment:
             # 9. 로깅 (상세)
             self._log("INFO", f"🎯 에피소드 {ep+1} 완료")
             self._log("INFO", f"⏱️  지속시간: {episode_duration:.1f}s")
-            self._log("INFO", f"🏆 보상: {episode_reward:.2f}")
-            self._log("INFO", f"📊 RMSE: {metrics['rmse']:.2f}")
-            self._log("INFO", f"📈 오버슈트: {metrics['overshoot']:.1f}%")
-            self._log("INFO", f"⏰ 정착시간: {metrics['settling_time']:.2f}s")
-            self._log("INFO", f"🎯 밴드유지: {metrics['band_time']:.1f}s")
+            self._log("INFO", f"🏆 보상: {total_reward:.2f}")
+            self._log("INFO", f"📊 RMSE: {final_metrics['rmse']:.2f}")
+            self._log("INFO", f"📈 오버슈트: {final_metrics['overshoot']:.1f}%")
+            self._log("INFO", f"⏰ 정착시간: {final_metrics['settling_time']:.2f}s")
+            self._log("INFO", f"🎯 밴드유지: {final_metrics['band_time']:.1f}s")
             self._log("INFO", f"🏅 최고보상: {best_reward:.2f}")
 
             # 10. 이전 에피소드 정보 업데이트
@@ -933,8 +1020,8 @@ class PIDGainOptimizationEnvironment:
             episode_record = {
                 "episode": ep + 1,
                 "pid_gains": pid_gains.copy(),
-                "reward": episode_reward,
-                "metrics": metrics,
+                "reward": total_reward,
+                "metrics": final_metrics,
             }
             self.episode_history.append(episode_record)
 
@@ -943,7 +1030,7 @@ class PIDGainOptimizationEnvironment:
                 self.episode_history.pop(0)
 
             print(
-                f"📊 [히스토리] 에피소드 {ep+1} 기록: 보상={episode_reward:.2f}, PID={pid_gains}"
+                f"📊 [히스토리] 에피소드 {ep+1} 기록: 보상={total_reward:.2f}, PID={pid_gains}"
             )
             print(
                 f"📈 [히스토리] 총 {len(self.episode_history)}개 에피소드 기록 유지 (최대 5개)"
@@ -1005,11 +1092,7 @@ class PIDGainOptimizationEnvironment:
                     next_pid_gains.copy()
                 )  # ✅ 저장! (다음 에피소드에서 사용)
                 print(
-                    f"🎯 [다음 에피소드] PID 계산 및 저장: Kp={next_pid_gains[0]:.2f}, Ki={next_pid_gains[1]:.2f}, Kd={next_pid_gains[2]:.2f}"
-                )
-                self._log(
-                    "INFO",
-                    f"🎯 다음 에피소드 PID: Kp={next_pid_gains[0]:.2f}, Ki={next_pid_gains[1]:.2f}, Kd={next_pid_gains[2]:.2f}",
+                    f"🎯 다음 에피소드 PID: Kp={next_pid_gains[0]:.2f}, Ki={next_pid_gains[1]:.2f}, Kd={next_pid_gains[2]:.2f}"
                 )
             else:
                 # 마지막 에피소드인 경우 현재 PID 사용
@@ -1108,8 +1191,8 @@ class PIDGainOptimizationEnvironment:
                 )
         self._log("INFO", f"📄 에피소드 요약 저장: {summary_csv}")
 
-        # 14. 데이터 저장
-        DataSaver.save_all_data(self, episodes, force=True)
+        # 14. 최종 그래프 생성
+        self.generate_episode_reward_graph(save_to_rlogger_folder=True)
 
         # 15. 학습 완료 신호 전송
         print(f"📤 [전송] 모든 에피소드 완료 - 학습 종료 신호 전송 중...")
@@ -1130,3 +1213,144 @@ class PIDGainOptimizationEnvironment:
 
         self.comm.close()
 
+    def _build_segment_state(self, prev_pid_gains, prev_reward, force_segment, target_force, segment_len_s):
+        """
+        🆕 세그먼트별 상태 벡터 생성 (20차원)
+        
+        기존 12차원 + 궤적 요약 8차원
+        
+        Args:
+            prev_pid_gains: [Kp, Ki, Kd]
+            prev_reward: 이전 보상 (또는 현재 세그먼트 보상)
+            force_segment: 힘 궤적 세그먼트 (예: 2000개 샘플 = 2초)
+            target_force: 목표 힘
+            segment_len_s: 세그먼트 길이 (초)
+        
+        Returns:
+            state: 20차원 numpy array
+        """
+        import numpy as np
+        
+        # 1. 기존 12차원 (로봇PC 6 + 강화학습PC 6)
+        base_state = [
+            prev_pid_gains[0],  # Kp
+            prev_pid_gains[1],  # Ki
+            prev_pid_gains[2],  # Kd
+            prev_reward,
+            target_force,
+            segment_len_s,
+        ]
+        
+        # 기존 6개 통계 (강화학습PC 계산)
+        if force_segment and len(force_segment) >= 10:
+            force = np.array(force_segment, dtype=np.float64)
+            errors = force - target_force
+            
+            base_stats = [
+                float(np.mean(force)),       # 평균
+                float(np.std(force)),        # 표준편차
+                float(np.min(force)),        # 최소
+                float(np.max(force)),        # 최대
+                float(np.mean(errors)),      # 평균 오차
+                float(np.std(errors)),       # 오차 표준편차
+            ]
+        else:
+            base_stats = [0.0] * 6
+        
+        base_state.extend(base_stats)  # 12차원 완성
+        
+        # 2. 🆕 궤적 요약 8차원 추가
+        if not force_segment or len(force_segment) < 10:
+            trajectory_features = [0.0] * 8
+            return np.array(base_state + trajectory_features, dtype=np.float32)
+        
+        force = np.array(force_segment, dtype=np.float64)
+        T_abs = max(abs(target_force), 1.0)
+        errors = force - target_force
+        
+        # (1) Overshoot % 계산
+        if target_force < 0:
+            overshoot = max(0.0, (target_force - np.min(force)) / T_abs * 100.0)
+        else:
+            overshoot = max(0.0, (np.max(force) - target_force) / T_abs * 100.0)
+        
+        # (2) Settling Time (간단 버전)
+        fs_hz = len(force) / max(segment_len_s, 1e-6)
+        tol_settling = max(Constants.SETTLING_BAND_TOLERANCE, 0.01 * T_abs)
+        in_settling = np.abs(errors) <= tol_settling
+        settling_idx = len(force)
+        
+        hold_samples = int(fs_hz * Constants.SETTLING_HOLD_TIME_S)
+        for i in range(len(in_settling) - hold_samples):
+            if in_settling[i:i+hold_samples].all():
+                settling_idx = i
+                break
+        settling_time = float(settling_idx / fs_hz)
+        
+        # (3) RMSE
+        rmse = float(np.sqrt(np.mean(errors**2)))
+        
+        # (4) Band Ratio
+        band_ratio = float(np.mean(np.abs(errors) <= Constants.BAND_TOLERANCE_N))
+        
+        # (5-6) 진동 주파수 & 진폭 (FFT)
+        if len(errors) > 100:
+            windowed = errors * np.hanning(len(errors))
+            fft = np.fft.rfft(windowed)
+            psd = np.abs(fft)**2
+            freqs = np.fft.rfftfreq(len(errors), d=1.0/fs_hz)
+            
+            valid_idx = (freqs >= 0.1) & (freqs <= 50.0)
+            if valid_idx.any():
+                psd_valid = psd[valid_idx]
+                freqs_valid = freqs[valid_idx]
+                peak_idx = np.argmax(psd_valid)
+                oscillation_freq = float(freqs_valid[peak_idx])
+                oscillation_amp = float(np.sqrt(psd_valid[peak_idx]) / len(errors))
+            else:
+                oscillation_freq = 0.0
+                oscillation_amp = 0.0
+        else:
+            oscillation_freq = 0.0
+            oscillation_amp = 0.0
+        
+        # (7) Rise Time (10% → 90%)
+        force_initial = float(force[0])
+        force_final = float(np.mean(force[-max(1, int(len(force)*0.1)):]))
+        target_10 = force_initial + 0.1 * (force_final - force_initial)
+        target_90 = force_initial + 0.9 * (force_final - force_initial)
+        
+        try:
+            if target_force < 0:
+                idx_10 = np.where(force <= target_10)[0][0]
+                idx_90 = np.where(force <= target_90)[0][0]
+            else:
+                idx_10 = np.where(force >= target_10)[0][0]
+                idx_90 = np.where(force >= target_90)[0][0]
+            rise_time = float(abs(idx_90 - idx_10) / fs_hz)
+        except:
+            rise_time = 0.0
+        
+        # (8) Steady State Error
+        steady_state_error = float(force_final - target_force)
+        
+        # 통합
+        trajectory_features = [
+            overshoot,           # 1
+            settling_time,       # 2
+            rmse,                # 3
+            band_ratio,          # 4
+            oscillation_freq,    # 5
+            oscillation_amp,     # 6
+            rise_time,           # 7
+            steady_state_error,  # 8
+        ]
+        
+        state = np.array(base_state + trajectory_features, dtype=np.float32)
+        
+        # NaN/Inf 가드
+        if np.isnan(state).any() or np.isinf(state).any():
+            self._log("ERROR", f"❌ 상태 벡터에 NaN/Inf 발견! 제로 패딩 대체")
+            state = np.nan_to_num(state, nan=0.0, posinf=0.0, neginf=0.0)
+        
+        return state

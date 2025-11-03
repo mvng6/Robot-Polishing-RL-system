@@ -5,7 +5,7 @@ import numpy as np
 import torch
 
 from .config import create_config
-from .env import PIDGainOptimizationEnvironment
+from .env import PIDGainEnvironment
 from .utils.signals import install_signal_handlers
 from .utils.data_saver import DataSaver
 from .loggers.base_logger import AppLogger
@@ -39,7 +39,7 @@ def main():
     torch.backends.cudnn.benchmark = False
     print("🎲 재현성 시드 설정 완료 (42)")
     
-    env = PIDGainOptimizationEnvironment(config_dict)
+    env = PIDGainEnvironment(config_dict)
     _global_env = env
     
     # 시그널 핸들러 설치 (env 생성 후)
