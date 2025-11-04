@@ -1412,8 +1412,8 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 	// ===============================================
 	// PID 게인 및 바운드 설정
 	g_pDlg->m_pidctrl.setGains(
-		40.0,			// Kp
-		50.0,			// Ki
+		80.0,			// Kp
+		130.0,			// Ki
 		0.0);			// Kd
 	g_pDlg->m_pidctrl.setOutputLimits(
 		-1500.0,		// min
@@ -1435,6 +1435,8 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 	const float RL_min_integral_limit = -100.0f;				// 최소 적분 한계값
 
 	int RL_count = 0;
+
+	float set_chamber_air = 0.2f;								// 초기 챔버 공압 설정값 (MPa)
 
 	// 데이터 기록 시작
 	//g_pDlg->m_flags.logThreadRunning.store(true);
@@ -1491,7 +1493,6 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 			RL_confirm = g_pDlg->m_received_RL_timing_accurate.load();
 			episode_ended = g_pDlg->m_received_RL_episode_done.load();
 			RL_end = g_pDlg->m_received_RL_learning_done.load();
-			//g_pDlg->m_tcpip.rl_pressure_from_server = g_pDlg->m_received_RL_Pressure.load();
 			RL_count++;
 			
 			printf("수신된 Flag : %d\t%d\t%d", RL_confirm, episode_ended, RL_end);
@@ -1508,7 +1509,7 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 				// ====================================
 
 				g_pDlg->m_setting.Target_Force_N.store(-30.0f);
-				g_pDlg->m_airctrl.setDesiredChamberPressure(0.0);
+				g_pDlg->m_airctrl.setDesiredChamberPressure(set_chamber_air);
 				RL_count = 0;
 				g_pDlg->m_received_RL_episode_done.store(false);
 
@@ -1586,6 +1587,8 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 				g_pDlg->m_flags.flat_stop.store(false);
 			}
 
+			printf("P: %.3f, I: %.3f, D: %.3f | \n", debug_p, debug_i, debug_d);
+
 			// Control Step.0: 툴을 금형 시편에 접촉하기 위한 하강 동작
 			if (g_pDlg->m_setting.Control_Step == 0)
 			{
@@ -1604,6 +1607,9 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 					approachConfig.target_z = 385.0f;
 					approachConfig.ramp_duration_sec = 3.0; // 가속 시간 설정
 					approachConfig.move_distance = std::abs(approachConfig.target_z - start_pos_z);	// 총 이동 거리 계산
+
+					// 4. 챔버 공압 설정
+					g_pDlg->m_airctrl.setDesiredChamberPressure(set_chamber_air);
 				}
 				auto now = std::chrono::system_clock::now();
 				double elapsed_sec = std::chrono::duration<double>(now - rampStartTime).count();
@@ -1699,8 +1705,8 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 						actual_dt = 0.01;
 					}
 
-					double current_force = Th_sensorData_flat.filteredForce[2];						// [N] 측정된 접촉력
-					double setpoint_force = g_pDlg->m_setting.Target_Force_N.load();					// [N] 목표 접촉력
+					double current_force = Th_sensorData_flat.filteredForce[2];								// [N] 측정된 접촉력
+					double setpoint_force = g_pDlg->m_setting.Target_Force_N.load();						// [N] 목표 접촉력
 
 					// PID 제어기 계산
 					PIDController::Result result = g_pDlg->m_pidctrl.calculate(setpoint_force, current_force, actual_dt);
@@ -1827,8 +1833,7 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 					{
 						g_pDlg->m_setting.vz_mms = 0.0;
 						g_pDlg->m_setting.Control_Step = 0;
-
-						// 챔버 공압 ON (초기 환경 압력 설정)
+						g_pDlg->m_setting.First_Contact.store(true);
 
 						Status_gui_str.Format(_T("[평면 구동] Control Step 99: 환경 리셋 완료!!!"));
 						g_pDlg->var_status_gui.SetWindowTextW(Status_gui_str);
@@ -2499,7 +2504,7 @@ void CRobotCommSWDJv5Dlg::OnBnClickedButAirOn()
 {
 	m_flags.airTask.store(true);									// 공압 제어 태스크 활성화 플래그 설정	
 
-	m_airctrl.setDesiredChamberPressure(0.0);						// 초기 압력 설정
+	m_airctrl.setDesiredChamberPressure(0.2);						// 초기 압력 설정
 	m_airctrl.setDesiredSpindlePressure(0.0);						// 초기 스핀들 압력 설정
 
 	// =========================================
