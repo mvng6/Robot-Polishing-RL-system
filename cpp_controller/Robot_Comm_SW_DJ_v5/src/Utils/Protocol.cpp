@@ -101,9 +101,9 @@ bool UnpackRLAgentCommand(const char* buffer, int length, RLAgentPacket& outPack
 	outPacket.RL_gain_I = rl_gain_I;
 	outPacket.RL_gain_D = rl_gain_D;
 
-	outPacket.RL_MessagerecvFlag = received_packet.RL_MessagerecvFlag;
-	outPacket.RL_EpisodeFlag = received_packet.RL_EpisodeFlag;
-	outPacket.RL_EndFlag = received_packet.RL_EndFlag;
+	outPacket.RL_timing_accurate = received_packet.RL_timing_accurate;
+	outPacket.RL_episode_done = received_packet.RL_episode_done;
+	outPacket.RL_learning_done = received_packet.RL_learning_done;
 	outPacket.checksum = received_checksum;
 
 	return true;

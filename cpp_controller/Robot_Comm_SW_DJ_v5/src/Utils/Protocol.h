@@ -20,13 +20,12 @@ struct PythonCommPacket {
 #pragma pack(push, 1)
 struct RLAgentPacket {
 	unsigned short	sof;						// 0xBBBB(2 bytes)
-	//float			RL_ResidualP;				// 서버(RL 에이전트)로부터 받은 압력 보정값 (4 bytes)
 	float			RL_gain_P;					// PID P 게인값 (4 bytes)
 	float			RL_gain_I;					// PID I 게인값 (4 bytes)
 	float			RL_gain_D;					// PID D 게인값 (4 bytes)
-	bool			RL_MessagerecvFlag;			// 서버(RL 에이전트)로부터 메시지 수신 확인 플래그 (1 byte) - 0: 메시지 수신 X / 1: 메시지 수신 O
-	bool			RL_EpisodeFlag;				// 서버(RL 에이전트)에서 에피소드 종료 신호 확인 플래그 (1 byte)   - 0: 에피소드 계속 O / 1: 에피소드 종료 X
-	bool			RL_EndFlag;					// 서버(RL 에이전트)에서 학습 종료 신호 플래그 (1 byte)   - 0: 학습 종료 / 1: 학습 계속
+	bool			RL_timing_accurate;			// 서버(RL 에이전트)로부터 메시지 수신 확인 플래그 (1 byte) - 0: 메시지 수신 X / 1: 메시지 수신 O
+	bool			RL_episode_done;			// 서버(RL 에이전트)에서 에피소드 종료 신호 확인 플래그 (1 byte)   - 0: 에피소드 계속 O / 1: 에피소드 종료 X
+	bool			RL_learning_done;			// 서버(RL 에이전트)에서 학습 종료 신호 플래그 (1 byte)   - 0: 학습 종료 / 1: 학습 계속
 	unsigned short	checksum;					// 체크섬 검증용 값 (2 bytes)
 };
 #pragma pack(pop)

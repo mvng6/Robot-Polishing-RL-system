@@ -645,10 +645,12 @@ UINT CRobotCommSWDJv5Dlg::Thread_Servo(LPVOID pParam)
 			if (stopRobotWithError(_T("Fy 접촉력 초과로 인한 정지")))
 				break;
 		}
-		else if (abs(Th_sensorData_servo.filteredForce[2]) > 85.0)
+		else if (abs(Th_sensorData_servo.filteredForce[2]) > 100.0)
 		{
-			if (stopRobotWithError(_T("Fz 접촉력 초과로 인한 정지")));
+			//if (stopRobotWithError(_T("Fz 접촉력 초과로 인한 정지")));
 				//break;
+			printf("Fz 접촉력 초과로 인한 정지!\n");
+
 		}
 		else if (abs(Th_robotData_servo.tcpVel[2]) > 30.0)
 		{
@@ -1410,8 +1412,8 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 	// ===============================================
 	// PID 게인 및 바운드 설정
 	g_pDlg->m_pidctrl.setGains(
-		80.0,			// Kp
-		130.0,			// Ki
+		40.0,			// Kp
+		50.0,			// Ki
 		0.0);			// Kd
 	g_pDlg->m_pidctrl.setOutputLimits(
 		-1500.0,		// min
@@ -1468,7 +1470,7 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 		// =========================================================================
 		// Episode가 종료된 경우 , RL Episode Flag가 true로 설정됨
 		//	 => 목표 접촉력 변경
-		if (g_pDlg->m_received_RL_Confirm_Flag.load() == true)
+		if (g_pDlg->m_received_RL_timing_accurate.load() == true)
 		{
 			// 메세지 수신 주기 측정 로직 시작
 			auto current_message_time = std::chrono::steady_clock::now();
@@ -1485,11 +1487,10 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 			}
 			// 다음 측정을 위해 현재 시각을 저장
 			last_message_time = current_message_time;
-			// 메세지 수신 주기 측정 로직 종료
 
-			RL_confirm = g_pDlg->m_received_RL_Confirm_Flag.load();
-			episode_ended = g_pDlg->m_received_RL_Episode_Flag.load();
-			RL_end = g_pDlg->m_received_RL_End_Flag.load();
+			RL_confirm = g_pDlg->m_received_RL_timing_accurate.load();
+			episode_ended = g_pDlg->m_received_RL_episode_done.load();
+			RL_end = g_pDlg->m_received_RL_learning_done.load();
 			//g_pDlg->m_tcpip.rl_pressure_from_server = g_pDlg->m_received_RL_Pressure.load();
 			RL_count++;
 			
@@ -1497,13 +1498,6 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 
 			if (episode_ended)
 			{
-				/*std::random_device rd;
-				std::mt19937 gen(rd());
-				std::uniform_int_distribution<> dist(35, 50);
-				int random_force = dist(gen);
-
-				g_pDlg->m_setting.Target_Force_N.store(-1.0f * random_force);*/
-
 				g_pDlg->m_pidctrl.setGains(
 					g_pDlg->m_received_RL_P_Gain.load(),
 					g_pDlg->m_received_RL_I_Gain.load(),
@@ -1516,12 +1510,10 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 				g_pDlg->m_setting.Target_Force_N.store(-30.0f);
 				g_pDlg->m_airctrl.setDesiredChamberPressure(0.0);
 				RL_count = 0;
-				g_pDlg->m_received_RL_Episode_Flag.store(false);
+				g_pDlg->m_received_RL_episode_done.store(false);
 
 				g_pDlg->m_setting.First_Contact.store(true);
 				g_pDlg->m_setting.Control_Step = 99;			// 에피소드 종료로 인한 환경 리셋
-
-				//printf(">> 환경 리셋! 새 목표 접촉력: %.2f N <<\n", -1.0f * random_force);
 			}
 			else if (RL_end)
 			{
@@ -1531,20 +1523,16 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 			else
 			{
 				if (reception_period_ms > 0.0) {
-					/*printf("RL PC로부터 %d번째 메세지 수신 성공! (RL_P: %f) | 수신 주기: %.2f ms\n",
-						RL_count, g_pDlg->m_tcpip.rl_pressure_from_server.load(), reception_period_ms);*/
 					printf("RL PC로부터 %d번째 메세지 수신 성공! (RL_Gain: %.3f\t%.3f\t%.3f) | 수신 주기: %.2f ms\n",
 						RL_count, g_pDlg->m_received_RL_P_Gain.load(),g_pDlg->m_received_RL_I_Gain.load(),g_pDlg->m_received_RL_D_Gain.load(), reception_period_ms);
 				}
 				else {
-					/*printf("RL PC로부터 %d번째 메세지 수신 성공! (RL_P: %f) | (첫 메시지)\n",
-						RL_count, g_pDlg->m_tcpip.rl_pressure_from_server.load());*/
 					printf("RL PC로부터 %d번째 메세지 수신 성공! (RL_Gain: %.3f\t%.3f\t%.3f) | (첫 메시지)\n",
 						RL_count, g_pDlg->m_received_RL_P_Gain.load(), g_pDlg->m_received_RL_I_Gain.load(), g_pDlg->m_received_RL_D_Gain.load());
 				}
 			}
 			
-			g_pDlg->m_received_RL_Confirm_Flag.store(false);
+			g_pDlg->m_received_RL_timing_accurate.store(false);
 		}
 
 		// =========================================================================
@@ -2730,7 +2718,7 @@ void CRobotCommSWDJv5Dlg::OnRlDataReceived(const RLAgentPacket& packet)
 	m_received_RL_P_Gain.store(packet.RL_gain_P);
 	m_received_RL_I_Gain.store(packet.RL_gain_I);
 	m_received_RL_D_Gain.store(packet.RL_gain_D);
-	m_received_RL_Confirm_Flag.store(packet.RL_MessagerecvFlag == 1);
-	m_received_RL_Episode_Flag.store(packet.RL_EpisodeFlag == 1);
-	m_received_RL_End_Flag.store(packet.RL_EndFlag == 1);
+	m_received_RL_timing_accurate.store(packet.RL_timing_accurate == 1);
+	m_received_RL_episode_done.store(packet.RL_episode_done == 1);
+	m_received_RL_learning_done.store(packet.RL_learning_done == 1);
 }
