@@ -24,6 +24,11 @@ class RewardBreakdownLogger:
         self.episode_rewards_path = os.path.join(
             self.log_dir, "episode_rewards.csv"
         )
+        # 🆕 에피소드별 보상 구성 요소 저장
+        self.episode_components = []  # 버퍼
+        self.episode_components_path = os.path.join(
+            self.log_dir, "episode_reward_components.csv"
+        )
         print(f"📁 Reward breakdown 저장 폴더: {self.log_dir}")
 
     def log_step(
@@ -255,6 +260,11 @@ class RewardBreakdownLogger:
                 self.save_episode_rewards(episode_rewards)
                 self.generate_episode_reward_graph(episode_rewards)
 
+            # 🆕 보상 구성 요소 CSV 저장 및 그래프 생성
+            if self.episode_components:
+                self.save_episode_components_csv()
+                self.generate_reward_components_graph()
+
             # PNG 생성 (전체 데이터)
             start_ep = min(row["episode"] for row in self.rows)
             end_ep = max(row["episode"] for row in self.rows)
@@ -263,4 +273,308 @@ class RewardBreakdownLogger:
             print(f"✅ Reward breakdown 저장: {self.log_dir}")
 
         # 메모리 절약을 위해 rows 유지 (전체 그래프용)
+
+    def log_episode_components(
+        self,
+        episode,
+        reward_score,
+        r_centered,
+        r_baseline,
+        overshoot,
+        settling_time,
+        band_ratio,
+        reward,
+    ):
+        """
+        🆕 에피소드별 보상 구성 요소 로깅
+        
+        Args:
+            episode: 에피소드 번호
+            reward_score: 원시 보상 스코어 (0~1)
+            r_centered: 중심화된 보상 (reward_score - baseline)
+            r_baseline: 보상 기준선 (EWMA)
+            overshoot: 오버슈트 (%)
+            settling_time: 정착시간 (초)
+            band_ratio: 밴드 유지 비율 (0~1)
+            reward: 최종 보상 (tanh 적용 후, -1~1)
+        """
+        self.episode_components.append(
+            {
+                "episode": episode,
+                "reward_score": float(reward_score),
+                "r_centered": float(r_centered),
+                "r_baseline": float(r_baseline),
+                "overshoot": float(overshoot),
+                "settling_time": float(settling_time),
+                "band_ratio": float(band_ratio),
+                "reward": float(reward),
+            }
+        )
+
+    def save_episode_components_csv(self):
+        """에피소드별 보상 구성 요소를 CSV로 저장"""
+        if not self.episode_components:
+            return
+
+        with open(self.episode_components_path, mode="w", newline="") as f:
+            writer = csv.DictWriter(
+                f,
+                fieldnames=[
+                    "episode",
+                    "reward_score",
+                    "r_centered",
+                    "r_baseline",
+                    "overshoot",
+                    "settling_time",
+                    "band_ratio",
+                    "reward",
+                ],
+            )
+            writer.writeheader()
+            writer.writerows(self.episode_components)
+        print(f"   📊 CSV: episode_reward_components.csv")
+
+    def _moving_average(self, data, window=10):
+        """Moving average 계산 (window 크기만큼의 평균)"""
+        if len(data) < window:
+            return data
+        result = []
+        for i in range(len(data)):
+            start = max(0, i - window + 1)
+            result.append(np.mean(data[start : i + 1]))
+        return result
+
+    def generate_reward_components_graph(self):
+        """
+        🆕 보상 구성 요소 시각화 그래프 생성
+        - reward_score, r_centered, r_baseline을 동일 x축에 플롯
+        - overshoot, settling_time, band_ratio를 함께 플롯
+        - Moving average (10-ep) 적용
+        """
+        if not self.episode_components:
+            return
+
+        try:
+            episodes = [c["episode"] for c in self.episode_components]
+            reward_scores = [c["reward_score"] for c in self.episode_components]
+            r_centereds = [c["r_centered"] for c in self.episode_components]
+            r_baselines = [c["r_baseline"] for c in self.episode_components]
+            overshoots = [c["overshoot"] for c in self.episode_components]
+            settling_times = [c["settling_time"] for c in self.episode_components]
+            band_ratios = [c["band_ratio"] for c in self.episode_components]
+            rewards = [c["reward"] for c in self.episode_components]
+
+            # Moving average 계산 (10-ep)
+            ma_window = 10
+            reward_scores_ma = self._moving_average(reward_scores, ma_window)
+            r_centereds_ma = self._moving_average(r_centereds, ma_window)
+            overshoots_ma = self._moving_average(overshoots, ma_window)
+            settling_times_ma = self._moving_average(settling_times, ma_window)
+            band_ratios_ma = self._moving_average(band_ratios, ma_window)
+
+            # ========== 그래프 1: 보상 구성 요소 (왼쪽 y축) ==========
+            fig, ax1 = plt.subplots(figsize=(14, 7))
+
+            # 원시 데이터 (투명하게)
+            ax1.plot(
+                episodes,
+                reward_scores,
+                "b-",
+                alpha=0.3,
+                linewidth=1,
+                label="reward_score (raw)",
+            )
+            ax1.plot(
+                episodes,
+                r_centereds,
+                "g-",
+                alpha=0.3,
+                linewidth=1,
+                label="r_centered (raw)",
+            )
+            ax1.plot(
+                episodes,
+                r_baselines,
+                "r--",
+                alpha=0.3,
+                linewidth=1,
+                label="r_baseline (raw)",
+            )
+
+            # Moving average (선명하게)
+            ax1.plot(
+                episodes,
+                reward_scores_ma,
+                "b-",
+                linewidth=2.5,
+                marker="o",
+                markersize=4,
+                label=f"reward_score (MA{ma_window})",
+            )
+            ax1.plot(
+                episodes,
+                r_centereds_ma,
+                "g-",
+                linewidth=2.5,
+                marker="s",
+                markersize=4,
+                label=f"r_centered (MA{ma_window})",
+            )
+            ax1.plot(
+                episodes,
+                r_baselines,
+                "r--",
+                linewidth=2,
+                alpha=0.7,
+                label="r_baseline (EWMA)",
+            )
+
+            ax1.set_xlabel("Episode", fontsize=12)
+            ax1.set_ylabel("Reward Components", fontsize=12, color="k")
+            ax1.tick_params(axis="y", labelcolor="k")
+            ax1.grid(True, alpha=0.3)
+            ax1.legend(loc="upper left", fontsize=10)
+
+            # ========== 그래프 2: 제어 성능 지표 (오른쪽 y축) ==========
+            ax2 = ax1.twinx()
+
+            # 원시 데이터 (투명하게)
+            ax2.plot(
+                episodes,
+                overshoots,
+                "orange",
+                alpha=0.3,
+                linewidth=1,
+                label="overshoot % (raw)",
+            )
+            ax2.plot(
+                episodes,
+                settling_times,
+                "purple",
+                alpha=0.3,
+                linewidth=1,
+                label="settling_time (raw)",
+            )
+            ax2.plot(
+                episodes,
+                [r * 100 for r in band_ratios],
+                "brown",
+                alpha=0.3,
+                linewidth=1,
+                label="band_ratio % (raw)",
+            )
+
+            # Moving average
+            ax2.plot(
+                episodes,
+                overshoots_ma,
+                "orange",
+                linewidth=2.5,
+                marker="^",
+                markersize=4,
+                label=f"overshoot % (MA{ma_window})",
+            )
+            ax2.plot(
+                episodes,
+                settling_times_ma,
+                "purple",
+                linewidth=2.5,
+                marker="v",
+                markersize=4,
+                label=f"settling_time (MA{ma_window})",
+            )
+            ax2.plot(
+                episodes,
+                [r * 100 for r in band_ratios_ma],
+                "brown",
+                linewidth=2.5,
+                marker="d",
+                markersize=4,
+                label=f"band_ratio % (MA{ma_window})",
+            )
+
+            ax2.set_ylabel("Control Performance Metrics", fontsize=12, color="k")
+            ax2.tick_params(axis="y", labelcolor="k")
+            ax2.legend(loc="upper right", fontsize=10)
+
+            plt.title(
+                "Reward Components & Control Performance Over Episodes",
+                fontsize=14,
+                fontweight="bold",
+            )
+            plt.tight_layout()
+
+            filename = os.path.join(
+                self.log_dir, "episode_reward_components.png"
+            )
+            plt.savefig(filename, dpi=300, bbox_inches="tight")
+            plt.close()
+            print(f"   📈 PNG: episode_reward_components.png")
+
+            # ========== 그래프 3: 최종 보상과 reward_score 비교 ==========
+            fig, ax = plt.subplots(figsize=(14, 6))
+
+            # 원시 데이터
+            ax.plot(
+                episodes,
+                reward_scores,
+                "b-",
+                alpha=0.3,
+                linewidth=1,
+                label="reward_score (raw)",
+            )
+            ax.plot(
+                episodes,
+                rewards,
+                "g-",
+                alpha=0.3,
+                linewidth=1,
+                label="reward (tanh 적용, raw)",
+            )
+
+            # Moving average
+            ax.plot(
+                episodes,
+                reward_scores_ma,
+                "b-",
+                linewidth=2.5,
+                marker="o",
+                markersize=4,
+                label=f"reward_score (MA{ma_window})",
+            )
+            ax.plot(
+                episodes,
+                self._moving_average(rewards, ma_window),
+                "g-",
+                linewidth=2.5,
+                marker="s",
+                markersize=4,
+                label=f"reward (MA{ma_window})",
+            )
+
+            # 기준선 (0)
+            ax.axhline(y=0, color="k", linestyle="--", alpha=0.5, linewidth=1)
+
+            ax.set_xlabel("Episode", fontsize=12)
+            ax.set_ylabel("Reward Value", fontsize=12)
+            ax.set_title(
+                "Reward Score vs Final Reward (tanh clipped)",
+                fontsize=14,
+                fontweight="bold",
+            )
+            ax.grid(True, alpha=0.3)
+            ax.legend(loc="best", fontsize=10)
+
+            plt.tight_layout()
+            filename2 = os.path.join(
+                self.log_dir, "episode_reward_comparison.png"
+            )
+            plt.savefig(filename2, dpi=300, bbox_inches="tight")
+            plt.close()
+            print(f"   📈 PNG: episode_reward_comparison.png")
+
+        except Exception as e:
+            print(f"   ⚠️ 보상 구성 요소 그래프 생성 실패: {e}")
+            import traceback
+            traceback.print_exc()
 

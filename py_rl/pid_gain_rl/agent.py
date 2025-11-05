@@ -1,9 +1,11 @@
 """
 SAC Agent - Actor, Critic, ReplayBuffer, PIDGainSACAgent
-- Actor/Critic: 128–128 2층 MLP, Actor log_std ∈ [-3, -1.0] (Fine-tuning용)
+- Actor/Critic: 128–128 2층 MLP, Actor log_std ∈ [-2.5, -0.3] (새 PID 범위 탐색 강화)
 - 학습률 분리: LR_ACTOR(1e-4), LR_CRITIC(2e-4) 지원
 - 🆕 세그먼트 분할 학습 지원
 - 🆕 표준편차 Annealing 지원
+- 🆕 Target Entropy 동적 조정 (초기 100ep 공격적 탐색)
+- 🆕 Warm-start 버퍼 초기화 (LHS 샘플링)
 """
 import os
 import random
@@ -22,8 +24,8 @@ class Actor(nn.Module):
         state_dim,
         action_dim,
         hidden_dim=128,
-        log_std_min=-3,
-        log_std_max=-1.0,  # 🔥 0.5 → -1.0 (Fine-tuning용)
+        log_std_min=-2.5,  # 하한 보장
+        log_std_max=-0.3,  # -1.0 → -0.3 (새 PID 범위 탐색 강화)
     ):
         super().__init__()
         self.log_std_min, self.log_std_max = log_std_min, log_std_max
@@ -137,16 +139,20 @@ class PIDGainSACAgent:
             cfg["HIDDEN"],
         )
         self.gamma, self.tau = cfg["GAMMA"], cfg["TAU"]
-        self.alpha = Constants.ACTOR_INITIAL_ALPHA  # 🔥 0.02
+        self.alpha = Constants.ACTOR_INITIAL_ALPHA  # 0.1 (업데이트됨)
         self.auto_entropy_tuning = cfg["AUTO_ENTROPY"]
         
         # 🆕 표준편차 Annealing 상태
         self.current_episode = 0
         self.std_scale = Constants.STD_ANNEAL_INITIAL  # 1.0
         
+        # 🆕 Target Entropy 동적 조정 준비
+        self.action_dim_for_entropy = a_dim
+        
         self.actor = Actor(
             s_dim, a_dim, hidden, 
-            log_std_max=Constants.ACTOR_LOG_STD_MAX
+            log_std_max=Constants.ACTOR_LOG_STD_MAX,
+            log_std_min=Constants.ACTOR_LOG_STD_MIN
         ).to(self.device)
         self.critic = Critic(s_dim, a_dim, hidden).to(self.device)
         self.critic_target = Critic(s_dim, a_dim, hidden).to(self.device)
@@ -158,9 +164,11 @@ class PIDGainSACAgent:
         self.critic_opt = optim.Adam(self.critic.parameters(), lr=lr_critic)
         
         if self.auto_entropy_tuning:
-            self.target_entropy = -torch.prod(
-                torch.tensor([a_dim], device=self.device)
-            ).item()
+            # 🆕 Target Entropy 동적 조정: 초기 100ep는 더 공격적 탐색
+            self.target_entropy_initial = Constants.TARGET_ENTROPY_INITIAL_FACTOR * a_dim  # -3.6 (3차원)
+            self.target_entropy_final = Constants.TARGET_ENTROPY_FINAL_FACTOR * a_dim    # -3.0 (3차원)
+            self.target_entropy_transition_episodes = Constants.TARGET_ENTROPY_TRANSITION_EPISODES
+            self.target_entropy = self.target_entropy_initial  # 초기값: 더 공격적
             self.log_alpha = torch.zeros(
                 1, requires_grad=True, device=self.device
             )
@@ -175,6 +183,10 @@ class PIDGainSACAgent:
             "MAX_EPISODE_REWARDS_HISTORY",
             Constants.DEFAULT_MAX_REWARDS_HISTORY,
         )
+        
+        # 🆕 탐색 메트릭 추적
+        self.recent_actions = []  # 최근 액션 히스토리 (탐색 메트릭용)
+        self.max_recent_actions = 100  # 최대 100개 유지
 
     def update_std_scale(self, episode_num):
         """
@@ -193,6 +205,25 @@ class PIDGainSACAgent:
                       (Constants.STD_ANNEAL_END_EPISODE - Constants.STD_ANNEAL_START_EPISODE)
             self.std_scale = Constants.STD_ANNEAL_INITIAL + \
                             progress * (Constants.STD_ANNEAL_FINAL - Constants.STD_ANNEAL_INITIAL)
+    
+    def update_target_entropy(self, episode_num):
+        """
+        🆕 Target Entropy 동적 조정
+        초기 100ep 동안 더 공격적 탐색을 위해 target_entropy를 점진적으로 조정
+        """
+        if not self.auto_entropy_tuning:
+            return
+        
+        if episode_num < self.target_entropy_transition_episodes:
+            # 초기 100ep: 점진적으로 전환
+            progress = episode_num / self.target_entropy_transition_episodes
+            self.target_entropy = (
+                self.target_entropy_initial + 
+                progress * (self.target_entropy_final - self.target_entropy_initial)
+            )
+        else:
+            # 이후: 최종값 유지
+            self.target_entropy = self.target_entropy_final
 
     def select_action(self, state, evaluate=False):
         """
@@ -210,6 +241,12 @@ class PIDGainSACAgent:
 
         action_np = action.cpu().numpy().flatten()
         pid_gains = scale_action_to_pid(action_np, self.cfg["PID_RANGE"])
+        
+        # 🆕 탐색 메트릭 추적 (최근 액션 저장)
+        if not evaluate:
+            self.recent_actions.append(action_np.copy())
+            if len(self.recent_actions) > self.max_recent_actions:
+                self.recent_actions.pop(0)  # 오래된 것 제거
 
         if log_prob is not None:
             log_prob = log_prob.cpu().numpy()
@@ -353,6 +390,112 @@ class PIDGainSACAgent:
                         self.tau * lp.data + (1 - self.tau) * tp.data
                     )
 
+    def warm_start_buffer(self, num_samples=None):
+        """
+        🆕 라틴 하이퍼큐브 샘플링으로 버퍼 초기화
+        새 PID 범위에서 골고루 샘플링하여 버퍼 품질 확보
+        """
+        if num_samples is None:
+            num_samples = Constants.WARM_START_NUM_SAMPLES
+        
+        print(f"🔥 Warm-start: {num_samples}개 샘플로 버퍼 초기화 중...")
+        
+        try:
+            from scipy.stats import qmc
+            use_lhs = True
+        except ImportError:
+            print("⚠️ scipy 없음, 랜덤 샘플링 사용")
+            use_lhs = False
+        
+        pid_range = self.cfg["PID_RANGE"]
+        
+        if use_lhs:
+            # LHS 샘플링
+            sampler = qmc.LatinHypercube(d=3)
+            samples = sampler.random(n=num_samples)
+            
+            # Kp, Ki: 선형, Kd: 로그
+            kp_samples = samples[:, 0] * (pid_range["Kp"][1] - pid_range["Kp"][0]) + pid_range["Kp"][0]
+            ki_samples = samples[:, 1] * (pid_range["Ki"][1] - pid_range["Ki"][0]) + pid_range["Ki"][0]
+            kd_log_samples = samples[:, 2] * (np.log10(pid_range["Kd"][1]) - np.log10(pid_range["Kd"][0])) + np.log10(pid_range["Kd"][0])
+            kd_samples = 10 ** kd_log_samples
+        else:
+            # 랜덤 샘플링 (scipy 없을 때)
+            kp_samples = np.random.uniform(pid_range["Kp"][0], pid_range["Kp"][1], num_samples)
+            ki_samples = np.random.uniform(pid_range["Ki"][0], pid_range["Ki"][1], num_samples)
+            kd_log_samples = np.random.uniform(
+                np.log10(pid_range["Kd"][0]), 
+                np.log10(pid_range["Kd"][1]), 
+                num_samples
+            )
+            kd_samples = 10 ** kd_log_samples
+        
+        # 각 샘플에 대해 더미 transition 저장
+        for kp, ki, kd in zip(kp_samples, ki_samples, kd_samples):
+            # 더미 상태 생성
+            dummy_state = np.zeros(self.cfg["STATE_DIM"], dtype=np.float32)
+            dummy_next_state = np.zeros(self.cfg["STATE_DIM"], dtype=np.float32)
+            
+            # PID를 액션으로 변환 (scale_action_to_pid의 역함수)
+            kp_norm = 2.0 * (kp - pid_range["Kp"][0]) / (pid_range["Kp"][1] - pid_range["Kp"][0]) - 1.0
+            ki_norm = 2.0 * (ki - pid_range["Ki"][0]) / (pid_range["Ki"][1] - pid_range["Ki"][0]) - 1.0
+            kd_log = np.log10(max(kd, 1e-12))
+            kd_log_min = np.log10(pid_range["Kd"][0])
+            kd_log_max = np.log10(pid_range["Kd"][1])
+            kd_norm = 2.0 * (kd_log - kd_log_min) / (kd_log_max - kd_log_min) - 1.0
+            
+            dummy_action = np.array([kp_norm, ki_norm, kd_norm], dtype=np.float32)
+            dummy_reward = 0.0
+            dummy_done = False
+            
+            self.replay.push(dummy_state, dummy_action, dummy_reward, dummy_next_state, dummy_done)
+        
+        print(f"✅ Warm-start 완료: {len(self.replay)}개 transition (목표: {num_samples})")
+    
+    def log_exploration_metrics(self, episode_num):
+        """
+        🆕 탐색 효과 모니터링
+        action std/range 비율 및 Kd decade 커버리지 계산
+        """
+        if len(self.recent_actions) < 20:
+            return None
+        
+        recent_actions = np.array(self.recent_actions[-20:])  # 최근 20개
+        pid_range = self.cfg["PID_RANGE"]
+        
+        # Action std/range 비율 계산
+        action_std = np.std(recent_actions, axis=0)
+        action_range = np.array([2.0, 2.0, 2.0])  # [-1, 1] 범위
+        std_ratio_pct = (action_std / action_range * 100).mean()  # 평균
+        
+        # Kd decade 커버리지
+        # PID로 변환하여 Kd 값 추출
+        kd_values = []
+        for action in recent_actions:
+            pid_gains = scale_action_to_pid(action, pid_range)
+            kd_values.append(pid_gains[2])
+        
+        kd_log = np.log10(np.array(kd_values))
+        kd_log_range = np.log10(pid_range["Kd"][1]) - np.log10(pid_range["Kd"][0])
+        num_bins = 7  # 6개 구간
+        kd_bins = np.linspace(np.log10(pid_range["Kd"][0]), np.log10(pid_range["Kd"][1]), num_bins + 1)
+        bin_indices = np.digitize(kd_log, kd_bins)
+        unique_bins = len(np.unique(bin_indices))
+        coverage_pct = (unique_bins / num_bins) * 100
+        
+        # Target 값
+        target_std_ratio = 3.0 if episode_num > 100 else 15.0
+        
+        metrics = {
+            "episode": episode_num,
+            "action_std_ratio_pct": float(std_ratio_pct),
+            "kd_coverage_pct": float(coverage_pct),
+            "target_std_ratio": target_std_ratio,
+            "num_recent_actions": len(recent_actions),
+        }
+        
+        return metrics
+    
     def save_model(self, path):
         torch.save(
             {

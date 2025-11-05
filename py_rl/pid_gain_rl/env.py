@@ -139,6 +139,11 @@ class PIDGainEnvironment:
         
         # RMSE (전체 추종 오차)
         rmse = float(np.sqrt(np.mean(errors**2)))
+        
+        # 🆕 초기 구간 피크 패널티 (0~0.5초 구간 전용)
+        early_peak_penalty = self._calculate_early_peak_penalty(
+            force_array, target_force, episode_len_s, dt
+        )
 
         # Overshoot (% 단위로 일관화)
         if target_force < 0:
@@ -255,13 +260,14 @@ class PIDGainEnvironment:
         
         reward_score = (
             Constants.SCORE_W_TS * S_ts +       # 0.30: 정착시간
-            Constants.SCORE_W_MP * S_mp +       # 0.25: 오버슈트
+            Constants.SCORE_W_MP * S_mp +       # 0.35: 오버슈트 (업데이트됨)
             Constants.SCORE_W_ESS * S_ess +     # 0.20: 정상상태 오차
             Constants.SCORE_W_BAND * S_band +   # 0.15: 밴드 유지
             Constants.SCORE_W_U * S_u -         # 0.05: 제어 노력
             Constants.SCORE_W_FAIL * P_fail +   # -0.15: 추종 실패
             W_PBRS * progress +                 # +0.10: 순간 개선 (PBRS)
-            W_IMPR * I_improve                  # +0.10: 기준선 대비 개선
+            W_IMPR * I_improve -                 # +0.10: 기준선 대비 개선
+            early_peak_penalty                   # 🆕 초기 구간 피크 패널티
         )
 
         # ========== 8. 🔥 중심화 + tanh 소프트클립 [-1,1] ==========
@@ -305,6 +311,7 @@ class PIDGainEnvironment:
             "baseline_ts": self._baseline["ts"],
             "baseline_mp": self._baseline["mp"],
             "baseline_ess": self._baseline["ess_abs"],
+            "early_peak_penalty": early_peak_penalty,  # 🆕 초기 구간 피크 패널티
         }
 
         # ========== 11. NaN/Inf 안전 가드 ==========
@@ -320,6 +327,49 @@ class PIDGainEnvironment:
                 metrics[key] = 0.0 if key != "settling_time" else episode_len_s
 
         return reward, metrics
+    
+    def _calculate_early_peak_penalty(self, force_array, target_force, episode_len_s, dt):
+        """
+        🆕 초기 구간 피크 패널티 계산
+        0~0.5초 구간에서 발생한 피크에 대한 패널티
+        
+        Args:
+            force_array: 힘 데이터 배열
+            target_force: 목표 힘
+            episode_len_s: 에피소드 길이 (초)
+            dt: 샘플링 시간 간격
+        
+        Returns:
+            penalty: 패널티 값 (상한 0.15~0.2)
+        """
+        import numpy as np
+        
+        time_window = Constants.EARLY_PEAK_TIME_WINDOW  # 0.5초
+        max_samples = int(time_window / dt)
+        
+        if len(force_array) < max_samples:
+            # 데이터가 부족하면 전체 사용
+            early_force = force_array
+        else:
+            early_force = force_array[:max_samples]
+        
+        if len(early_force) == 0:
+            return 0.0
+        
+        # 피크 힘 계산
+        if target_force < 0:
+            peak_force = float(np.min(early_force))
+        else:
+            peak_force = float(np.max(early_force))
+        
+        # 피크 패널티 계산
+        peak_detector = max(0.0, abs(peak_force - target_force) / abs(target_force))
+        penalty = min(
+            peak_detector * Constants.EARLY_PEAK_PENALTY_SCALE,
+            Constants.EARLY_PEAK_PENALTY_MAX
+        )
+        
+        return float(penalty)
 
     def generate_episode_reward_graph(self, save_to_rlogger_folder=True):
         if not hasattr(self, "agent") or not self.agent.episode_rewards:
@@ -462,7 +512,8 @@ class PIDGainEnvironment:
                 return
 
         episode_stats = []
-        best_reward = -float("inf")
+        best_reward = -float("inf")  # 전체 에피소드 최고 보상 (통계용)
+        best_reward_after_min = -float("inf")  # MIN_EPISODES_FOR_SAVING 이후 최고 보상 (저장용)
         best_pid_gains = None
 
         # =========================
@@ -478,11 +529,28 @@ class PIDGainEnvironment:
 
         # 전역 시간 기준점 (학습 시작 시간)
         training_start_time = time.perf_counter()
+        
+        # 🆕 Warm-start: 버퍼 초기화 (첫 에피소드 전에만)
+        if Constants.WARM_START_ENABLED and len(self.agent.replay) == 0:
+            self.agent.warm_start_buffer()
 
         for ep in range(episodes):
             # 에피소드별 리셋 없음 (연속 모니터링)
 
             self.episode_count = ep
+            
+            # 🆕 Target Entropy 동적 조정
+            self.agent.update_target_entropy(ep)
+            
+            # 🆕 탐색 메트릭 로깅 (20 에피소드마다)
+            if ep % 20 == 0 and ep > 0:
+                exploration_metrics = self.agent.log_exploration_metrics(ep)
+                if exploration_metrics:
+                    self._log("INFO", 
+                        f"📊 탐색 메트릭 [Ep {ep}]: "
+                        f"std_ratio={exploration_metrics['action_std_ratio_pct']:.1f}%, "
+                        f"Kd_coverage={exploration_metrics['kd_coverage_pct']:.1f}%"
+                    )
             print(f"\n{'='*60}\n에피소드 {ep+1}/{episodes}")
             if ep > 0 and self.previous_pid_gains is not None:
                 # 이전 에피소드 정보를 활용한 상태 추정
@@ -672,7 +740,7 @@ class PIDGainEnvironment:
                         next_pid_for_reset[0],  # ✅ 다음 에피소드 PID 전송
                         next_pid_for_reset[1],
                         0.0,  # 하드웨어에는 항상 D=0.0 전송
-                        timing_accurate=False,
+                        timing_accurate=True,  # ✅ 정상 종료와 동일한 플래그로 전송
                         episode_done=True,  # 에피소드 종료 신호
                         learning_done=False,
                     )
@@ -825,6 +893,12 @@ class PIDGainEnvironment:
                         batch_size=min(self.cfg["BATCH_SIZE"], len(self.agent.replay)),
                         num_updates=1,
                     )
+                
+                # 안전 위반 보상도 best_reward 추적에 포함 (통계 목적)
+                # 단, 안전 위반 보상(-1.0)은 best_reward_after_min 저장 대상이 아님 (50 에피소드 이후 최고 보상만 저장)
+                if bad_reward >= best_reward:
+                    best_reward = bad_reward
+                
                 continue  # 다음 에피소드로
             
             # ========== 🔥 세그먼트 분할 처리 (라인 1005 대체) ==========
@@ -944,22 +1018,45 @@ class PIDGainEnvironment:
 
             # RewardBreakdownLogger 플러시 (에피소드 경계에서) - 그래프 생성은 최종에만
             if hasattr(self, "rlogger"):
+                # 🆕 에피소드별 보상 구성 요소 로깅
+                # band_ratio 계산: band_time / episode_len_s
+                band_ratio = (
+                    final_metrics.get("band_time", 0.0) / self.cfg["EPISODE_SECONDS"]
+                    if self.cfg["EPISODE_SECONDS"] > 0
+                    else 0.0
+                )
+                self.rlogger.log_episode_components(
+                    episode=ep + 1,
+                    reward_score=final_metrics.get("reward_score", 0.0),
+                    r_centered=final_metrics.get("r_centered", 0.0),
+                    r_baseline=final_metrics.get("r_baseline", 0.0),
+                    overshoot=final_metrics.get("overshoot", 0.0),
+                    settling_time=final_metrics.get("settling_time", 0.0),
+                    band_ratio=band_ratio,
+                    reward=total_reward,
+                )
+                
                 self.rlogger.flush_if_needed(
                     ep + 1,
                     force=False,
                     episode_rewards=self.agent.episode_rewards,
                 )
 
-            # 최고 성능 PID gain 저장 (동일 점수도 저장)
+            # 전체 에피소드 최고 보상 추적 (통계용)
             if total_reward >= best_reward:
                 best_reward = total_reward
-                best_pid_gains = pid_gains.copy()
-                self.agent.save_model(
-                    f"{model_save_dir}/best_pid_agent_episode_{ep+1}_reward_{best_reward:.2f}.pth"
-                )
-                print(
-                    f"💾 [저장] 최고 성능 에이전트 저장: 에피소드 {ep+1}, 보상 {best_reward:.2f}"
-                )
+            
+            # 최고 성능 PID gain 저장 (50 에피소드 이후 최고 보상만 저장)
+            if (ep + 1) >= Constants.MIN_EPISODES_FOR_SAVING:
+                if total_reward >= best_reward_after_min:
+                    best_reward_after_min = total_reward
+                    best_pid_gains = pid_gains.copy()
+                    self.agent.save_model(
+                        f"{model_save_dir}/best_pid_agent_episode_{ep+1}_reward_{best_reward_after_min:.2f}.pth"
+                    )
+                    print(
+                        f"💾 [저장] 최고 성능 에이전트 저장: 에피소드 {ep+1}, 보상 {best_reward_after_min:.2f}"
+                    )
 
             # 8. 학습 (안정적 gradient 추정을 위한 최소 버퍼 크기 보장)
             # 중요: 학습을 먼저 수행한 후 다음 PID를 계산해야 학습된 네트워크 사용!
@@ -1011,7 +1108,11 @@ class PIDGainEnvironment:
             self._log("INFO", f"📈 오버슈트: {final_metrics['overshoot']:.1f}%")
             self._log("INFO", f"⏰ 정착시간: {final_metrics['settling_time']:.2f}s")
             self._log("INFO", f"🎯 밴드유지: {final_metrics['band_time']:.1f}s")
-            self._log("INFO", f"🏅 최고보상: {best_reward:.2f}")
+            # 50 에피소드 이후 최고 보상 표시 (저장 대상)
+            if (ep + 1) >= Constants.MIN_EPISODES_FOR_SAVING:
+                self._log("INFO", f"🏅 전체 최고보상: {best_reward:.2f}, 저장 대상 최고보상: {best_reward_after_min:.2f}")
+            else:
+                self._log("INFO", f"🏅 전체 최고보상: {best_reward:.2f} (저장 대기 중, {Constants.MIN_EPISODES_FOR_SAVING} 에피소드 이후 저장 시작)")
 
             # 10. 이전 에피소드 정보 업데이트
             self.previous_pid_gains = pid_gains.copy()
@@ -1149,11 +1250,18 @@ class PIDGainEnvironment:
         # 12. 최종 결과
         self._log("INFO", "\n🎯 PID Gain 최적화 완료!")
         self._log("INFO", f"✅ {episodes}개 에피소드 완료")
-        self._log("INFO", f"🏆 최고 보상: {best_reward:.2f}")
-        self._log(
-            "INFO",
-            f"🎯 최적 PID: Kp={best_pid_gains[0]:.2f}, Ki={best_pid_gains[1]:.2f}, Kd={best_pid_gains[2]:.2f}",
-        )
+        self._log("INFO", f"🏆 전체 최고 보상: {best_reward:.2f}")
+        if episodes >= Constants.MIN_EPISODES_FOR_SAVING:
+            self._log("INFO", f"💾 저장된 최고 보상 (에피소드 {Constants.MIN_EPISODES_FOR_SAVING} 이후): {best_reward_after_min:.2f}")
+            if best_pid_gains is not None:
+                self._log(
+                    "INFO",
+                    f"🎯 저장된 최적 PID: Kp={best_pid_gains[0]:.2f}, Ki={best_pid_gains[1]:.2f}, Kd={best_pid_gains[2]:.2f}",
+                )
+            else:
+                self._log("WARNING", "⚠️ 저장된 최적 PID 없음 (50 에피소드 이후 최고 보상이 없었습니다)")
+        else:
+            self._log("WARNING", f"⚠️ 전체 에피소드가 {Constants.MIN_EPISODES_FOR_SAVING}개 미만이어서 모델이 저장되지 않았습니다")
 
         # 13. 에피소드 요약 CSV 저장
         summary_csv = os.path.join(
@@ -1193,6 +1301,14 @@ class PIDGainEnvironment:
 
         # 14. 최종 그래프 생성
         self.generate_episode_reward_graph(save_to_rlogger_folder=True)
+        
+        # 🆕 보상 구성 요소 그래프 생성 (학습 종료 시)
+        if hasattr(self, "rlogger"):
+            self.rlogger.flush_if_needed(
+                episodes,
+                force=True,  # 최종 그래프 생성
+                episode_rewards=self.agent.episode_rewards,
+            )
 
         # 15. 학습 완료 신호 전송
         print(f"📤 [전송] 모든 에피소드 완료 - 학습 종료 신호 전송 중...")

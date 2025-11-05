@@ -12,20 +12,21 @@ class Constants:
     DEFAULT_GAMMA = 0.99
     DEFAULT_TAU = 0.01
     
-    # PID 범위 (fine-tuning 국소 탐색)
+    # PID 범위 (새 범위: 오버슈트 억제 및 댐핑 효과 확보)
     DEFAULT_PID_RANGE = {
-        "Kp": (35.0, 45.0),
-        "Ki": (45.0, 55.0),
-        "Kd": (1e-6, 1e-3),
+        "Kp": (3.0, 40.0),      # 하한 확장: 35 → 3 (오버슈트 억제)
+        "Ki": (0.0, 40.0),      # 하한 0까지, 상한 낮춤: 55 → 40 (조건부 적분 off 가능)
+        "Kd": (1e-4, 5e-2),     # 대폭 확장: 1e-6~1e-3 → 1e-4~5e-2 (댐핑 효과)
     }
     
     # 통신 기본 설정
     DEFAULT_RECV_FREQ = 1000
     DEFAULT_BATCH_SIZE = 64
     DEFAULT_EPISODES = 500
+    MIN_EPISODES_FOR_SAVING = 50  # 최고 성능 모델 저장 시작 에피소드 (초반 lucky reward 방지)
     DEFAULT_EPISODE_SECONDS = 10.0
     DEFAULT_TARGET_FORCE = -40.0
-    DEFAULT_UPDATES_PER_EPISODE = 10  # 🔥 8 → 10 (세그먼트 분할 대응)
+    DEFAULT_UPDATES_PER_EPISODE = 35  # 10 → 35 (세그먼트 분할 대응, 30~40 범위)
     
     # 통신 설정
     DEFAULT_HOST = "0.0.0.0"
@@ -57,6 +58,10 @@ class Constants:
     # ===== 🔥 세그먼트 분할 설정 =====
     NUM_SEGMENTS = 5  # 에피소드를 5개 세그먼트로 분할 (2초씩)
     SEGMENT_LENGTH_S = 2.0  # 각 세그먼트 길이 (초)
+    
+    # Warm-start 설정
+    WARM_START_ENABLED = True  # Warm-start 활성화 여부
+    WARM_START_NUM_SAMPLES = 50  # LHS 샘플 수 (30~50 범위)
     
     # ===== 세그먼트용 보상 파라미터 조정 =====
     SHAPING_WARMUP_S = 0.2  # 🔥 0.5 → 0.2 (세그먼트용)
@@ -95,17 +100,22 @@ class Constants:
 
     # ===== 스코어화 기반 보상 시스템 =====
     SCORE_TAU_TS = 5.0
-    SCORE_TAU_MP_PERCENT = 12.0
+    SCORE_TAU_MP_PERCENT = 8.0  # 12.0 → 8.0 (오버슈트 더 민감하게)
     SCORE_TAU_ESS_N = 1.0
     SCORE_TAU_U = 0.5
     
     SCORE_W_TS   = 0.30
-    SCORE_W_MP   = 0.25
+    SCORE_W_MP   = 0.35  # 0.25 → 0.35 (오버슈트 가중치 강화)
     SCORE_W_ESS  = 0.20
     SCORE_W_BAND = 0.15
     SCORE_W_U    = 0.05
     SCORE_W_FAIL = 0.15
     SCORE_W_PBRS = 0.10
+    
+    # 초기 구간 피크 패널티 설정
+    EARLY_PEAK_TIME_WINDOW = 0.5  # 0~0.5초 구간
+    EARLY_PEAK_PENALTY_SCALE = 0.2  # 패널티 스케일
+    EARLY_PEAK_PENALTY_MAX = 0.2  # 상한 (0.15~0.2)
     
     TRACKING_FAIL_RMSE_THRESHOLD = 5.0
     TRACKING_FAIL_BAND_RATIO = 0.3
@@ -117,14 +127,20 @@ class Constants:
     BAND_RATIO_TOLERANCE = 0.05
     BAND_RATIO_TOLERANCE_STRICT = 0.02
     
-    # ===== 🔥 Fine-tuning 설정 =====
-    ACTOR_LOG_STD_MAX = -1.0  # 🔥 0.5 → -1.0 (탐험 축소)
-    ACTOR_INITIAL_ALPHA = 0.02  # 🔥 0.2 → 0.02 (탐험 축소)
-    ACTOR_WEIGHT_GAIN = 0.05  # 🔥 0.5 → 0.05 (안정화)
+    # ===== 🔥 탐색/탐욕 비율 설정 (새 PID 범위 탐색 강화) =====
+    ACTOR_LOG_STD_MAX = -0.3  # -1.0 → -0.3 (더 큰 탐색 범위, σ ≤ e^{-0.3} ≈ 0.74)
+    ACTOR_LOG_STD_MIN = -2.5  # 하한 보장
+    ACTOR_INITIAL_ALPHA = 0.1  # 0.02 → 0.1 (더 큰 초기값, 자동 튜닝 활성화 시)
+    ACTOR_WEIGHT_GAIN = 0.05  # 0.5 → 0.05 (안정화)
     
     # ===== 🔥 표준편차 Annealing 설정 =====
     STD_ANNEAL_START_EPISODE = 0
-    STD_ANNEAL_END_EPISODE = 200
+    STD_ANNEAL_END_EPISODE = 150  # 200 → 150 (더 빠르게)
     STD_ANNEAL_INITIAL = 1.0
-    STD_ANNEAL_FINAL = 0.3
+    STD_ANNEAL_FINAL = 0.5  # 0.3 → 0.5 (덜 축소, 탐색 유지)
+    
+    # ===== Target Entropy 동적 조정 설정 =====
+    TARGET_ENTROPY_INITIAL_FACTOR = -1.2  # 초기 100ep: 더 공격적 탐색
+    TARGET_ENTROPY_FINAL_FACTOR = -1.0    # 이후: 표준
+    TARGET_ENTROPY_TRANSITION_EPISODES = 100  # 전환 에피소드 수
 
