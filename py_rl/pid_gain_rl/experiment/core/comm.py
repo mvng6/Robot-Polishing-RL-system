@@ -6,7 +6,7 @@ import struct
 import threading
 import time
 import numpy as np
-from .loggers.base_logger import AppLogger
+from ..utils.loggers.base_logger import AppLogger
 
 class PIDGainCommunicator:
     """

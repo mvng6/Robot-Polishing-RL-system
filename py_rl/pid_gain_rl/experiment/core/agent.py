@@ -15,8 +15,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from collections import deque
-from .constants import Constants
-from .utils.math_utils import scale_action_to_pid
+from ..config.constants import Constants
+from ..utils.utils.math_utils import scale_action_to_pid
 
 class Actor(nn.Module):
     def __init__(
@@ -264,10 +264,10 @@ class PIDGainSACAgent:
         """
         🔄 수정: 세그먼트별 transition 저장
         Args:
-            state: 현재 상태 (20차원) [0-11: 기존, 12-19: 궤적 요약]
+            state: 현재 상태 (STATE_DIM 차원) [0-(STATE_BASE_DIM-1): 기존, STATE_BASE_DIM-(STATE_DIM-1): 궤적 요약]
             action: PID gain 액션 [Kp, Ki, Kd]
             reward: 세그먼트 보상
-            next_state: 다음 상태 (20차원)
+            next_state: 다음 상태 (STATE_DIM 차원)
             done: 세그먼트 종료 여부
         """
         state_arr = np.array(state, dtype=np.float32)
@@ -495,7 +495,7 @@ class PIDGainSACAgent:
         }
         
         return metrics
-    
+
     def save_model(self, path):
         torch.save(
             {

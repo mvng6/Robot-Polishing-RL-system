@@ -4,6 +4,7 @@
 from dataclasses import dataclass, field
 from typing import Dict, Tuple
 
+from . import constants
 from .constants import Constants
 
 
@@ -11,7 +12,7 @@ from .constants import Constants
 class Config:
     """강화학습 설정을 관리하는 데이터클래스"""
     # 신경망 설정
-    state_dim: int = 12  # PID 정보를 압축하여 12D 유지
+    state_dim: int = Constants.STATE_DIM  # 20차원 상태 공간 (기본 12 + 궤적 요약 8)
     action_dim: int = 3
     hidden_dim: int = Constants.DEFAULT_HIDDEN_DIM
     lr: float = Constants.DEFAULT_LR
@@ -91,7 +92,7 @@ class Config:
     def from_dict(cls, config_dict: dict) -> 'Config':
         """딕셔너리로부터 생성"""
         return cls(
-            state_dim=config_dict.get("STATE_DIM", 12),
+            state_dim=config_dict.get("STATE_DIM", Constants.STATE_DIM),
             action_dim=config_dict.get("ACTION_DIM", 3),
             hidden_dim=config_dict.get("HIDDEN", Constants.DEFAULT_HIDDEN_DIM),
             lr=config_dict.get("LR", Constants.DEFAULT_LR),

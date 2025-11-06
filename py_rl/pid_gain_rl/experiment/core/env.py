@@ -9,12 +9,12 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 import random
 
-from .loggers.base_logger import AppLogger
-from .loggers.control_performance import ControlPerformanceLogger
-from .loggers.reward_breakdown import RewardBreakdownLogger
-from .loggers.learning_done import LearningDoneLogger
-from .constants import Constants
-from .utils.math_utils import create_initial_state, scale_action_to_pid
+from ..utils.loggers.base_logger import AppLogger
+from ..utils.loggers.control_performance import ControlPerformanceLogger
+from ..utils.loggers.reward_breakdown import RewardBreakdownLogger
+from ..utils.loggers.learning_done import LearningDoneLogger
+from ..config.constants import Constants
+from ..utils.utils.math_utils import create_initial_state, scale_action_to_pid
 from .agent import PIDGainSACAgent
 from .comm import PIDGainCommunicator
 from .monitor import RLRealtimeMonitor
@@ -23,20 +23,18 @@ class PIDGainEnvironment:
     """
     PID Gain 최적화 환경
     - 🆕 세그먼트 분할 학습 (1 에피소드 = 5 transition)
-    - 🆕 20차원 상태 공간 (12 + 8)
+    - 🆕 STATE_DIM 차원 상태 공간 (STATE_BASE_DIM + STATE_TRAJECTORY_DIM)
     """
 
     def __init__(self, cfg=None):
         if cfg is None:
             raise ValueError("cfg 파라미터가 필요합니다")
         
-        # 🔥 STATE_DIM 동적 계산 및 강제 설정
-        base_dim = 12  # 로봇PC 6 + 강화학습PC 
-        trajectory_dim = 8  # 궤적 요약 8차원
-        cfg["STATE_DIM"] = base_dim + trajectory_dim  # 20차원 강제 설정
+        # 🔥 STATE_DIM 설정 (Constants에서 가져오기)
+        cfg["STATE_DIM"] = Constants.STATE_DIM
         
-        print(f"✅ [Env] STATE_DIM 자동 설정: {cfg['STATE_DIM']}차원 "
-              f"(기존 {base_dim} + 궤적 {trajectory_dim})")
+        print(f"✅ [Env] STATE_DIM 설정: {cfg['STATE_DIM']}차원 "
+              f"(기본 {Constants.STATE_BASE_DIM} + 궤적 {Constants.STATE_TRAJECTORY_DIM})")
         print(f"✅ [Env] 세그먼트 분할: {Constants.NUM_SEGMENTS}개 "
               f"({Constants.SEGMENT_LENGTH_S}초씩)")
         print(f"✅ [Env] Fine-tuning: alpha={Constants.ACTOR_INITIAL_ALPHA}, "
@@ -139,7 +137,7 @@ class PIDGainEnvironment:
         
         # RMSE (전체 추종 오차)
         rmse = float(np.sqrt(np.mean(errors**2)))
-        
+
         # 🆕 초기 구간 피크 패널티 (0~0.5초 구간 전용)
         early_peak_penalty = self._calculate_early_peak_penalty(
             force_array, target_force, episode_len_s, dt
@@ -271,9 +269,10 @@ class PIDGainEnvironment:
         )
 
         # ========== 8. 🔥 중심화 + tanh 소프트클립 [-1,1] ==========
+        # Beta 값을 변수로 관리 (0.98~0.99 범위에서 조정 가능)
         beta = 0.99  # 느리게 추적 (최근 100 에피소드 가중평균)
         if not hasattr(self, "_rew_baseline"):
-            self._rew_baseline = 0.5  # 초기값 (중립)
+            self._rew_baseline = 0.0  # 초기값 변경: 0.5 → 0.0 (보상 범위 [-1, 1] 기준)
         
         # 보상 기준선 업데이트 (EWMA)
         self._rew_baseline = beta * self._rew_baseline + (1.0 - beta) * reward_score
@@ -387,11 +386,12 @@ class PIDGainEnvironment:
                 marker="o",
                 markersize=4,
             )
-            plt.xlabel("Episode", fontsize=12)
-            plt.ylabel("Episode Reward", fontsize=12)
+            plt.xlabel("Episode", fontsize=18)
+            plt.ylabel("Episode Reward", fontsize=18)
             plt.title(
-                "Episode Rewards Over Time", fontsize=14, fontweight="bold"
+                "Episode Rewards Over Time", fontsize=20, fontweight="bold"
             )
+            plt.tick_params(labelsize=15)  # 축 눈금 폰트 크기
             plt.grid(True, alpha=0.3)
             if len(episode_rewards) > 1:
                 avg_reward = np.mean(episode_rewards)
@@ -867,15 +867,15 @@ class PIDGainEnvironment:
                 print("⏭️  안전 위반으로 인한 조기 종료 - 최소 학습 후 다음 에피소드로 이동")
                 self._log("WARNING", f"에피소드 {ep+1} 안전 위반으로 조기 종료")
 
-                # 안전 위반 보상으로 transition 저장 (20차원 상태)
+                # 안전 위반 보상으로 transition 저장 (STATE_DIM 차원 상태)
                 bad_reward = episode_stats[-1]["reward"] if episode_stats else Constants.SAFETY_FORCE_PENALTY
-                final_state_violation = np.zeros(20, dtype=np.float32)  # 🔥 20차원 고정
+                final_state_violation = np.zeros(Constants.STATE_DIM, dtype=np.float32)
                 
-                # actual_initial_state가 12차원이면 20차원으로 확장
-                if actual_initial_state.shape[0] == 12:
+                # actual_initial_state가 기본 차원이면 전체 차원으로 확장
+                if actual_initial_state.shape[0] == Constants.STATE_BASE_DIM:
                     actual_initial_state_20d = np.concatenate([
                         actual_initial_state,
-                        np.zeros(8, dtype=np.float32)
+                        np.zeros(Constants.STATE_TRAJECTORY_DIM, dtype=np.float32)
                     ])
                 else:
                     actual_initial_state_20d = actual_initial_state
@@ -949,12 +949,12 @@ class PIDGainEnvironment:
             # 리플레이 버퍼에 세그먼트별 저장
             for i, seg in enumerate(segments_data):
                 if i == 0:
-                    # 첫 세그먼트: 에피소드 초기 상태 사용 (20차원으로 변환)
-                    if actual_initial_state.shape[0] == 12:
-                        # 12차원이면 20차원으로 확장 (제로 패딩)
+                    # 첫 세그먼트: 에피소드 초기 상태 사용 (STATE_DIM 차원으로 변환)
+                    if actual_initial_state.shape[0] == Constants.STATE_BASE_DIM:
+                        # 기본 차원이면 전체 차원으로 확장 (제로 패딩)
                         current_state = np.concatenate([
                             actual_initial_state,
-                            np.zeros(8, dtype=np.float32)
+                            np.zeros(Constants.STATE_TRAJECTORY_DIM, dtype=np.float32)
                         ])
                     else:
                         current_state = actual_initial_state
@@ -1033,6 +1033,7 @@ class PIDGainEnvironment:
                     overshoot=final_metrics.get("overshoot", 0.0),
                     settling_time=final_metrics.get("settling_time", 0.0),
                     band_ratio=band_ratio,
+                    rmse=final_metrics.get("rmse", 0.0),
                     reward=total_reward,
                 )
                 
@@ -1331,9 +1332,9 @@ class PIDGainEnvironment:
 
     def _build_segment_state(self, prev_pid_gains, prev_reward, force_segment, target_force, segment_len_s):
         """
-        🆕 세그먼트별 상태 벡터 생성 (20차원)
+        🆕 세그먼트별 상태 벡터 생성 (STATE_DIM 차원)
         
-        기존 12차원 + 궤적 요약 8차원
+        기본 STATE_BASE_DIM 차원 + 궤적 요약 STATE_TRAJECTORY_DIM 차원
         
         Args:
             prev_pid_gains: [Kp, Ki, Kd]
@@ -1343,11 +1344,11 @@ class PIDGainEnvironment:
             segment_len_s: 세그먼트 길이 (초)
         
         Returns:
-            state: 20차원 numpy array
+            state: STATE_DIM 차원 numpy array
         """
         import numpy as np
         
-        # 1. 기존 12차원 (로봇PC 6 + 강화학습PC 6)
+        # 1. 기본 차원 (로봇PC 6 + 강화학습PC 6)
         base_state = [
             prev_pid_gains[0],  # Kp
             prev_pid_gains[1],  # Ki
@@ -1373,11 +1374,11 @@ class PIDGainEnvironment:
         else:
             base_stats = [0.0] * 6
         
-        base_state.extend(base_stats)  # 12차원 완성
+        base_state.extend(base_stats)  # STATE_BASE_DIM 차원 완성
         
-        # 2. 🆕 궤적 요약 8차원 추가
+        # 2. 🆕 궤적 요약 STATE_TRAJECTORY_DIM 차원 추가
         if not force_segment or len(force_segment) < 10:
-            trajectory_features = [0.0] * 8
+            trajectory_features = [0.0] * Constants.STATE_TRAJECTORY_DIM
             return np.array(base_state + trajectory_features, dtype=np.float32)
         
         force = np.array(force_segment, dtype=np.float64)

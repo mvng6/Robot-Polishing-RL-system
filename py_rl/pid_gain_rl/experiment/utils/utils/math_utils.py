@@ -4,7 +4,7 @@
 import numpy as np
 from typing import List, Optional, Dict, Any
 
-from ..constants import Constants
+from ...config.constants import Constants
 
 
 def scale_action_to_pid(action, pid_range):
@@ -45,9 +45,9 @@ def create_initial_state(
     dt_sec=0.001
 ):
     """
-    초기 상태 벡터 생성 (20차원)
+    초기 상태 벡터 생성 (STATE_DIM 차원)
     
-    기존 12차원 (로봇PC 6 + 강화학습PC 6) + 궤적 요약 8차원
+    기본 STATE_BASE_DIM 차원 (로봇PC 6 + 강화학습PC 6) + 궤적 요약 STATE_TRAJECTORY_DIM 차원
     
     Args:
         force_data: 힘 데이터 리스트
@@ -57,11 +57,11 @@ def create_initial_state(
         dt_sec: 샘플링 시간 (미사용)
     
     Returns:
-        state: 20차원 numpy array
+        state: STATE_DIM 차원 numpy array
     """
     import numpy as np
     
-    # 1. 기존 12차원
+    # 1. 기본 STATE_BASE_DIM 차원
     if not force_data:
         force_data = [target_force]
     
@@ -91,7 +91,7 @@ def create_initial_state(
     else:
         base_stats = [target_force, 0.0, target_force, target_force, 0.0, 0.0]
     
-    base_state.extend(base_stats)  # 12차원 완성
+    base_state.extend(base_stats)  # STATE_BASE_DIM 차원 완성
     
     # 2. 🆕 궤적 요약 8차원 (초기값은 모두 0)
     # 에피소드 시작 시점이므로 궤적 정보 없음
@@ -112,7 +112,7 @@ def create_initial_state(
     if np.isnan(state).any() or np.isinf(state).any():
         state = np.nan_to_num(state, nan=0.0, posinf=0.0, neginf=0.0)
     
-    return state  # 20차원 반환
+    return state  # STATE_DIM 차원 반환
 
 # 주의: _estimate_state_from_previous_pid() 함수는 삭제되었습니다.
 # 이 함수는 experiment 폴더의 레거시 코드에서만 사용되며,

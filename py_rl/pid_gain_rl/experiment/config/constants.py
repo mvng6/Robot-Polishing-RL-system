@@ -4,6 +4,11 @@
 
 
 class Constants:
+    # ===== 상태 공간 차원 설정 =====
+    STATE_BASE_DIM = 12  # 기본 상태 차원 (로봇PC 6 + 강화학습PC 6)
+    STATE_TRAJECTORY_DIM = 8  # 궤적 요약 차원
+    STATE_DIM = STATE_BASE_DIM + STATE_TRAJECTORY_DIM  # 총 상태 차원 (20)
+    
     # 신경망 기본 설정 (fine-tuning 기본값)
     DEFAULT_HIDDEN_DIM = 128
     DEFAULT_LR = 1e-4

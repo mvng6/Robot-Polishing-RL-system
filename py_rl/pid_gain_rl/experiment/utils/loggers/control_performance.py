@@ -5,7 +5,7 @@ import csv
 import os
 import numpy as np
 import matplotlib.pyplot as plt
-from ..constants import Constants
+from ...config.constants import Constants
 
 class ControlPerformanceLogger:
     """
@@ -45,12 +45,18 @@ class ControlPerformanceLogger:
         print(f"📁 Control Performance 저장 폴더: {self.control_perf_dir}")
 
     def _setup_fonts(self):
-        """폰트 설정 (기본 크기)"""
+        """폰트 설정 (기본 크기 +6pt)"""
         try:
             import matplotlib.pyplot as plt
 
             plt.rcParams["font.family"] = "Times New Roman"
-            # 기본 크기 사용 (matplotlib 기본값)
+            # 기본 크기 +6pt 설정
+            plt.rcParams["axes.labelsize"] = 16  # 축 레이블 (기본 10 → 16)
+            plt.rcParams["axes.titlesize"] = 16  # 서브플롯 제목 (기본 10 → 16)
+            plt.rcParams["figure.titlesize"] = 18  # 그림 제목 (기본 12 → 18)
+            plt.rcParams["xtick.labelsize"] = 15  # x축 눈금 (기본 9 → 15)
+            plt.rcParams["ytick.labelsize"] = 15  # y축 눈금 (기본 9 → 15)
+            plt.rcParams["legend.fontsize"] = 16  # 범례 (기본 10 → 16)
         except Exception as e:
             pass  # 폰트 설정 실패해도 그래프는 생성됨
             print("기본 폰트 사용")
@@ -190,13 +196,19 @@ class ControlPerformanceLogger:
         # 목표값보다 더 나쁜 방향으로의 최대 편차 계산
         if target < 0:  # 음수 목표값 (압축력)
             # 더 큰 음수값 (더 큰 압축력)을 찾음
-            max_overshoot = np.min(force_array)  # 가장 작은 값 (가장 큰 음수)
-            if max_overshoot < target:
-                return float(((target - max_overshoot) / abs(target)) * 100)
+            extreme_force = np.min(force_array)  # 가장 작은 값 (가장 큰 음수)
+            if extreme_force < target:
+                # 오버슈트 = (목표 - 실제) / |목표| * 100
+                # 예: (-40 - (-60)) / 40 * 100 = 20/40 * 100 = 50%
+                overshoot = ((target - extreme_force) / abs(target)) * 100.0
+                return float(overshoot)
         else:  # 양수 목표값
-            max_overshoot = np.max(force_array)
-            if max_overshoot > target:
-                return float(((max_overshoot - target) / target) * 100)
+            extreme_force = np.max(force_array)
+            if extreme_force > target:
+                # 오버슈트 = (실제 - 목표) / |목표| * 100
+                # 예: (60 - 40) / 40 * 100 = 20/40 * 100 = 50%
+                overshoot = ((extreme_force - target) / abs(target)) * 100.0
+                return float(overshoot)
 
         return 0.0
 
@@ -421,9 +433,9 @@ class ControlPerformanceLogger:
             markeredgecolor="darkblue",
             markeredgewidth=1,
         )
-        plt.xlabel("Episode Number", fontweight="bold")
-        plt.ylabel(f"{metric_name.upper()}", fontweight="bold")
-        plt.title(f"{metric_name.upper()} Over Episodes", fontweight="bold")
+        plt.xlabel("Episode Number", fontweight="bold", fontsize=18)
+        plt.ylabel(f"{metric_name.upper()}", fontweight="bold", fontsize=18)
+        plt.title(f"{metric_name.upper()} Over Episodes", fontweight="bold", fontsize=20)
         plt.grid(True, alpha=0.3, linestyle="-", linewidth=0.5)
 
         # 평균선 추가
@@ -438,7 +450,7 @@ class ControlPerformanceLogger:
                 linewidth=2,
                 label=f"Mean: {avg_value:.4f}±{std_value:.4f}",
             )
-            plt.legend(loc="best", frameon=True, fancybox=True, shadow=True)
+            plt.legend(loc="best", frameon=True, fancybox=True, shadow=True, fontsize=16)
 
         # 축 범위 조정
         plt.xlim(min(episodes) - 0.5, max(episodes) + 0.5)
@@ -467,7 +479,7 @@ class ControlPerformanceLogger:
         # 3x4 서브플롯 생성 (10개 지표)
         fig, axes = plt.subplots(3, 4, figsize=(20, 12))
         fig.suptitle(
-            "PID Gain Optimization Performance Dashboard", fontweight="bold"
+            "PID Gain Optimization Performance Dashboard", fontweight="bold", fontsize=20
         )
 
         # 논문용 10개 핵심 지표만
@@ -508,8 +520,9 @@ class ControlPerformanceLogger:
                     marker="o",
                     markersize=4,
                 )
-                ax.set_title(f"{metric_name.upper()}", fontweight="bold")
+                ax.set_title(f"{metric_name.upper()}", fontweight="bold", fontsize=16)
                 ax.grid(True, alpha=0.3)
+                ax.tick_params(labelsize=15)  # 축 눈금 폰트 크기
 
                 # 평균선 추가
                 if len(values) > 1:
@@ -612,10 +625,10 @@ class ControlPerformanceLogger:
             label="±5% Tolerance Band",
         )
 
-        plt.xlabel("Time (s)", fontweight="bold")
-        plt.ylabel("Force (N)", fontweight="bold")
-        plt.title("Force Tracking Performance (Step-based)", fontweight="bold")
-        plt.legend(loc="best", frameon=True, fancybox=True, shadow=True)
+        plt.xlabel("Time (s)", fontweight="bold", fontsize=18)
+        plt.ylabel("Force (N)", fontweight="bold", fontsize=18)
+        plt.title("Force Tracking Performance (Step-based)", fontweight="bold", fontsize=20)
+        plt.legend(loc="best", frameon=True, fancybox=True, shadow=True, fontsize=16)
         plt.grid(True, alpha=0.3)
 
         png_path = os.path.join(
@@ -664,10 +677,10 @@ class ControlPerformanceLogger:
             label="Tolerance Band",
         )
 
-        plt.xlabel("Time (s)", fontweight="bold")
-        plt.ylabel("Force Error (N)", fontweight="bold")
-        plt.title("Force Error Time Series (Step-based)", fontweight="bold")
-        plt.legend(loc="best", frameon=True, fancybox=True, shadow=True)
+        plt.xlabel("Time (s)", fontweight="bold", fontsize=18)
+        plt.ylabel("Force Error (N)", fontweight="bold", fontsize=18)
+        plt.title("Force Error Time Series (Step-based)", fontweight="bold", fontsize=20)
+        plt.legend(loc="best", frameon=True, fancybox=True, shadow=True, fontsize=16)
         plt.grid(True, alpha=0.3)
 
         png_path = os.path.join(self.control_perf_dir, "error_time_series.png")
@@ -699,10 +712,10 @@ class ControlPerformanceLogger:
             linewidth=2,
             label="Control Input (PID Gain Sum)",
         )
-        plt.xlabel("Time (s)", fontweight="bold")
-        plt.ylabel("Control Input", fontweight="bold")
-        plt.title("Control Input Time Series (Step-based)", fontweight="bold")
-        plt.legend(loc="best", frameon=True, fancybox=True, shadow=True)
+        plt.xlabel("Time (s)", fontweight="bold", fontsize=18)
+        plt.ylabel("Control Input", fontweight="bold", fontsize=18)
+        plt.title("Control Input Time Series (Step-based)", fontweight="bold", fontsize=20)
+        plt.legend(loc="best", frameon=True, fancybox=True, shadow=True, fontsize=16)
         plt.grid(True, alpha=0.3)
 
         png_path = os.path.join(
@@ -758,33 +771,33 @@ class ControlPerformanceLogger:
         # 서브플롯 1: Progress Reward
         plt.subplot(2, 2, 1)
         plt.plot(time_array, progress_reward, "b-", linewidth=2)
-        plt.title("Progress Reward (Step-based)", fontweight="bold")
-        plt.xlabel("Time (s)")
-        plt.ylabel("Progress Reward")
+        plt.title("Progress Reward (Step-based)", fontweight="bold", fontsize=20)
+        plt.xlabel("Time (s)", fontsize=18)
+        plt.ylabel("Progress Reward", fontsize=18)
         plt.grid(True, alpha=0.3)
 
         # 서브플롯 2: In-band Reward
         plt.subplot(2, 2, 2)
         plt.plot(time_array, in_band_reward, "g-", linewidth=2)
-        plt.title("In-band Reward (Step-based)", fontweight="bold")
-        plt.xlabel("Time (s)")
-        plt.ylabel("In-band Reward")
+        plt.title("In-band Reward (Step-based)", fontweight="bold", fontsize=20)
+        plt.xlabel("Time (s)", fontsize=18)
+        plt.ylabel("In-band Reward", fontsize=18)
         plt.grid(True, alpha=0.3)
 
         # 서브플롯 3: Error Penalty
         plt.subplot(2, 2, 3)
         plt.plot(time_array, error_penalty, "r-", linewidth=2)
-        plt.title("Error Penalty (Step-based)", fontweight="bold")
-        plt.xlabel("Time (s)")
-        plt.ylabel("Error Penalty")
+        plt.title("Error Penalty (Step-based)", fontweight="bold", fontsize=20)
+        plt.xlabel("Time (s)", fontsize=18)
+        plt.ylabel("Error Penalty", fontsize=18)
         plt.grid(True, alpha=0.3)
 
         # 서브플롯 4: Stability Reward
         plt.subplot(2, 2, 4)
         plt.plot(time_array, stability_reward, "purple", linewidth=2)
-        plt.title("Stability Reward (Step-based)", fontweight="bold")
-        plt.xlabel("Time (s)")
-        plt.ylabel("Stability Reward")
+        plt.title("Stability Reward (Step-based)", fontweight="bold", fontsize=20)
+        plt.xlabel("Time (s)", fontsize=18)
+        plt.ylabel("Stability Reward", fontsize=18)
         plt.grid(True, alpha=0.3)
 
         png_path = os.path.join(
@@ -812,7 +825,7 @@ class ControlPerformanceLogger:
 
         # 2x2 서브플롯 생성
         fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-        fig.suptitle("Step-based Performance Dashboard", fontweight="bold")
+        fig.suptitle("Step-based Performance Dashboard", fontweight="bold", fontsize=20)
 
         time_array = np.array(self.time_data)
         force_array = np.array(self.force_data)
@@ -826,10 +839,11 @@ class ControlPerformanceLogger:
         axes[0, 0].plot(
             time_array, force_array, "b-", linewidth=1.5, label="Actual"
         )
-        axes[0, 0].set_title("Force Tracking", fontweight="bold")
-        axes[0, 0].set_xlabel("Time (s)")
-        axes[0, 0].set_ylabel("Force (N)")
-        axes[0, 0].legend()
+        axes[0, 0].set_title("Force Tracking", fontweight="bold", fontsize=16)
+        axes[0, 0].set_xlabel("Time (s)", fontsize=18)
+        axes[0, 0].set_ylabel("Force (N)", fontsize=18)
+        axes[0, 0].legend(fontsize=16)
+        axes[0, 0].tick_params(labelsize=15)
         axes[0, 0].grid(True, alpha=0.3)
 
         # 2. Error Time Series
@@ -838,18 +852,20 @@ class ControlPerformanceLogger:
         tolerance = 0.05 * target_array[0] if len(target_array) > 0 else 2.25
         axes[0, 1].axhline(y=tolerance, color="g", linestyle="--", alpha=0.7)
         axes[0, 1].axhline(y=-tolerance, color="g", linestyle="--", alpha=0.7)
-        axes[0, 1].set_title("Error Time Series", fontweight="bold")
-        axes[0, 1].set_xlabel("Time (s)")
-        axes[0, 1].set_ylabel("Error (N)")
+        axes[0, 1].set_title("Error Time Series", fontweight="bold", fontsize=16)
+        axes[0, 1].set_xlabel("Time (s)", fontsize=18)
+        axes[0, 1].set_ylabel("Error (N)", fontsize=18)
+        axes[0, 1].tick_params(labelsize=15)
         axes[0, 1].grid(True, alpha=0.3)
 
         # 3. Control Input
         if self.input_data:
             input_array = np.array(self.input_data)
             axes[1, 0].plot(time_array, input_array, "purple", linewidth=1.5)
-            axes[1, 0].set_title("Control Input", fontweight="bold")
-            axes[1, 0].set_xlabel("Time (s)")
-            axes[1, 0].set_ylabel("Input")
+            axes[1, 0].set_title("Control Input", fontweight="bold", fontsize=16)
+            axes[1, 0].set_xlabel("Time (s)", fontsize=18)
+            axes[1, 0].set_ylabel("Input", fontsize=18)
+            axes[1, 0].tick_params(labelsize=15)
             axes[1, 0].grid(True, alpha=0.3)
 
         # 4. Error Distribution
@@ -866,10 +882,11 @@ class ControlPerformanceLogger:
             label="±5% Tolerance",
         )
         axes[1, 1].axvline(x=-tolerance, color="r", linestyle="--", alpha=0.7)
-        axes[1, 1].set_title("Error Distribution", fontweight="bold")
-        axes[1, 1].set_xlabel("Error (N)")
-        axes[1, 1].set_ylabel("Frequency")
-        axes[1, 1].legend()
+        axes[1, 1].set_title("Error Distribution", fontweight="bold", fontsize=16)
+        axes[1, 1].set_xlabel("Error (N)", fontsize=18)
+        axes[1, 1].set_ylabel("Frequency", fontsize=18)
+        axes[1, 1].legend(fontsize=16)
+        axes[1, 1].tick_params(labelsize=15)
         axes[1, 1].grid(True, alpha=0.3)
 
         dashboard_path = os.path.join(

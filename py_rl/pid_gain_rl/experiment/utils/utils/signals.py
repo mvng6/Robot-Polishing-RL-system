@@ -66,8 +66,21 @@ def install_signal_handlers():
     """
     def handler_wrapper(signum, frame):
         # __main__ 모듈에서 _global_env 참조
+        # experiment.config.__main__ 또는 pid_gain_rl.__main__에서 참조
+        import sys
         import __main__
-        env_global = getattr(__main__, '_global_env', None)
+        # 여러 가능한 모듈 경로 확인
+        env_global = None
+        if hasattr(__main__, '_global_env'):
+            env_global = __main__._global_env
+        else:
+            # pid_gain_rl.experiment.config.__main__ 모듈 확인
+            try:
+                from pid_gain_rl.experiment.config import __main__ as config_main
+                if hasattr(config_main, '_global_env'):
+                    env_global = config_main._global_env
+            except:
+                pass
         signal_handler(signum, frame, env_global)
     
     signal.signal(signal.SIGINT, handler_wrapper)
