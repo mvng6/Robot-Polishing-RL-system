@@ -1,8 +1,8 @@
 """
 SAC Agent - Actor, Critic, ReplayBuffer, PIDGainSACAgent
-- Actor/Critic: 128–128 2층 MLP, Actor log_std ∈ [-2.5, -0.3] (새 PID 범위 탐색 강화)
+- Actor/Critic: 128–128 2층 MLP, Actor log_std ∈ [-2.5, -0.3]
 - 학습률 분리: LR_ACTOR(1e-4), LR_CRITIC(2e-4) 지원
-- 세그먼트 분할 학습 지원
+- 세그먼트 분할 학습 지원 [2 4 6 8 10]초마다
 - 표준편차 Annealing 지원
 - Target Entropy 동적 조정 (초기 100ep 공격적 탐색)
 - Warm-start 버퍼 초기화 (LHS 샘플링)
