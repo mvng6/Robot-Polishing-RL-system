@@ -1407,13 +1407,13 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 	// 공압 관련 변수 초기화
 	const double pressureRampDownDuration_sec = 3.0;			// 압력 감소 시간 (초)
 	static auto pressureRampStartTime = std::chrono::system_clock::now();
-	static float initialChamberPressure = 0.0f;
+	static float initialChamberPressure = 0.1f;
 
 	// ===============================================
 	// PID 게인 및 바운드 설정
 	g_pDlg->m_pidctrl.setGains(
 		80.0,			// Kp
-		130.0,			// Ki
+		100.0,			// Ki
 		0.0);			// Kd
 	g_pDlg->m_pidctrl.setOutputLimits(
 		-1500.0,		// min
@@ -1436,7 +1436,7 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 
 	int RL_count = 0;
 
-	float set_chamber_air = 0.2f;								// 초기 챔버 공압 설정값 (MPa)
+	float set_chamber_air = 0.0f;								// 초기 챔버 공압 설정값 (MPa)
 
 	// 데이터 기록 시작
 	//g_pDlg->m_flags.logThreadRunning.store(true);
@@ -1651,8 +1651,7 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 					{
 						g_pDlg->m_setting.vz_mms.store(0.0f);		// [mm/s] 접촉 유지 정지
 						g_pDlg->m_setting.First_Contact.store(true);
-						g_pDlg->m_setting.Control_Step = 2;
-						g_pDlg->m_setting.Target_Force_N.store(-40.0f);
+						g_pDlg->m_setting.Control_Step = 2;						
 
 						// 힘제어 시퀀스 시작 알림을 위한 서버로 메세지 전송
 						g_pDlg->m_flags.RL_sanderactive_flag.store(true);
@@ -1675,12 +1674,12 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 				if (g_pDlg->m_setting.First_Contact.load() == true)
 				{
 					g_pDlg->m_setting.First_Contact.store(false);
-					g_pDlg->m_setting.vx_mms.store(0.0);					// X축에 대한 이동 방향 & 속도 설정
 
 					g_pDlg->m_airctrl.setDesiredSpindlePressure(0.0);
 
 					// PID 컨트롤러 리셋
 					g_pDlg->m_pidctrl.reset();
+					g_pDlg->m_setting.Target_Force_N.store(-40.0f);
 
 					Status_gui_str.Format(_T("[평면 구동] Control Step 2: 평면 구동 & PID 힘 제어 시작"));
 					g_pDlg->var_status_gui.SetWindowTextW(Status_gui_str);
@@ -1735,7 +1734,6 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 				g_pDlg->m_servoctrl.vz_cmd.store(g_pDlg->m_setting.vz_mms);									// [mm/s]
 
 				// [MPa] 출력 챔버 공압 최종 설정 (PID 제어값 + RL 제어값)
-				//g_pDlg->m_airctrl.setDesiredChamberPressure(g_pDlg->m_airctrl.desiredChamberPressure() + g_pDlg->m_tcpip.rl_pressure_from_server);
 				g_pDlg->m_airctrl.setDesiredChamberPressure(g_pDlg->m_airctrl.desiredChamberPressure());
 			}
 			// Control Step.3: 평면 경로 구동 마무리
@@ -2504,7 +2502,7 @@ void CRobotCommSWDJv5Dlg::OnBnClickedButAirOn()
 {
 	m_flags.airTask.store(true);									// 공압 제어 태스크 활성화 플래그 설정	
 
-	m_airctrl.setDesiredChamberPressure(0.2);						// 초기 압력 설정
+	m_airctrl.setDesiredChamberPressure(0.1);						// 초기 압력 설정
 	m_airctrl.setDesiredSpindlePressure(0.0);						// 초기 스핀들 압력 설정
 
 	// =========================================
