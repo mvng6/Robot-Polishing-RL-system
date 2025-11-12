@@ -1382,7 +1382,7 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 
 	// ===============================================
 	// 실험 설정
-	g_pDlg->m_setting.Target_Force_N.store(-60.0f);				// 목표 접촉력 설정 (N)   [음수로 설정해줘야 로봇 베이스 좌표계와 동일한 방향]
+	g_pDlg->m_setting.Target_Force_N.store(-40.0f);				// 목표 접촉력 설정 (N)   [음수로 설정해줘야 로봇 베이스 좌표계와 동일한 방향]
 	g_pDlg->m_setting.Force_limit_N.store(85.0f);				// 접촉력 제한값 설정 (N)
 	g_pDlg->m_setting.Target_vz.store(5.0f);					// 목표 접촉 속도 설정 (mm/s) [양수로 설정해줘야 로봇 베이스 좌표계와 동일한 방향]
 	int Saturation_time = 5000;									// 접촉 유지 시간 설정 (ms)
@@ -1405,14 +1405,14 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 	// 공압 관련 변수 초기화
 	const double pressureRampDownDuration_sec = 3.0;			// 압력 감소 시간 (초)
 	static auto pressureRampStartTime = std::chrono::system_clock::now();
-	float set_chamber_air = 0.1f;								// 초기 챔버 공압 설정값 (MPa)
+	float set_chamber_air = 0.0225f;								// 초기 챔버 공압 설정값 (MPa)
 
 	// ===============================================
 	// PID 게인 및 바운드 설정
 	g_pDlg->m_pidctrl.setGains(
-		80.0,			// Kp
-		130.0,			// Ki
-		0.00);			// Kd
+		40.0,			// Kp
+		50.0,			// Ki
+		0.0);			// Kd
 	g_pDlg->m_pidctrl.setOutputLimits(
 		-1500.0,		// min
 		1500.0);		// max
@@ -1504,7 +1504,7 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 					g_pDlg->m_received_RL_P_Gain.load(), g_pDlg->m_received_RL_I_Gain.load(), g_pDlg->m_received_RL_D_Gain.load());
 				// ====================================
 
-				g_pDlg->m_setting.Target_Force_N.store(-30.0f);
+				g_pDlg->m_setting.Target_Force_N.store(-40.0f);
 				g_pDlg->m_airctrl.setDesiredChamberPressure(set_chamber_air);
 				RL_count = 0;
 				g_pDlg->m_received_RL_episode_done.store(false);
@@ -1673,7 +1673,7 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 
 					// PID 컨트롤러 리셋
 					g_pDlg->m_pidctrl.reset();
-					g_pDlg->m_setting.Target_Force_N.store(-50.0f);
+					g_pDlg->m_setting.Target_Force_N.store(-60.0f);
 
 					Status_gui_str.Format(_T("[평면 구동] Control Step 2: 평면 구동 & PID 힘 제어 시작"));
 					g_pDlg->var_status_gui.SetWindowTextW(Status_gui_str);
@@ -2496,7 +2496,7 @@ void CRobotCommSWDJv5Dlg::OnBnClickedButAirOn()
 {
 	m_flags.airTask.store(true);									// 공압 제어 태스크 활성화 플래그 설정	
 
-	m_airctrl.setDesiredChamberPressure(0.1);						// 초기 압력 설정
+	m_airctrl.setDesiredChamberPressure(0.0225);						// 초기 압력 설정
 	m_airctrl.setDesiredSpindlePressure(0.0);						// 초기 스핀들 압력 설정
 
 	// =========================================
