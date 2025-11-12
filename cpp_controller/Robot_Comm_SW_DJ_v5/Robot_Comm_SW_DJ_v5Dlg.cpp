@@ -1373,18 +1373,16 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 	// QueryPerformanceCounter → 시작 시각
 	LARGE_INTEGER startTick;
 	QueryPerformanceCounter(&startTick);		// 시작 시각
-
 	// nextTick: 첫 목표 시각 = startTick + one_ms_tick
 	LARGE_INTEGER nextTick = startTick;
 	nextTick.QuadPart += one_ms_tick;		// 첫 주기 목표
-
 	// 반복 주파수 측정용 변수(1초마다 실제 주기 계산)
 	LARGE_INTEGER freqStart = startTick;
 	int i_freq = 0;
 
 	// ===============================================
 	// 실험 설정
-	g_pDlg->m_setting.Target_Force_N.store(-30.0f);				// 목표 접촉력 설정 (N)   [음수로 설정해줘야 로봇 베이스 좌표계와 동일한 방향]
+	g_pDlg->m_setting.Target_Force_N.store(-60.0f);				// 목표 접촉력 설정 (N)   [음수로 설정해줘야 로봇 베이스 좌표계와 동일한 방향]
 	g_pDlg->m_setting.Force_limit_N.store(85.0f);				// 접촉력 제한값 설정 (N)
 	g_pDlg->m_setting.Target_vz.store(5.0f);					// 목표 접촉 속도 설정 (mm/s) [양수로 설정해줘야 로봇 베이스 좌표계와 동일한 방향]
 	int Saturation_time = 5000;									// 접촉 유지 시간 설정 (ms)
@@ -1407,14 +1405,14 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 	// 공압 관련 변수 초기화
 	const double pressureRampDownDuration_sec = 3.0;			// 압력 감소 시간 (초)
 	static auto pressureRampStartTime = std::chrono::system_clock::now();
-	static float initialChamberPressure = 0.1f;
+	float set_chamber_air = 0.1f;								// 초기 챔버 공압 설정값 (MPa)
 
 	// ===============================================
 	// PID 게인 및 바운드 설정
 	g_pDlg->m_pidctrl.setGains(
 		80.0,			// Kp
-		100.0,			// Ki
-		0.0);			// Kd
+		130.0,			// Ki
+		0.00);			// Kd
 	g_pDlg->m_pidctrl.setOutputLimits(
 		-1500.0,		// min
 		1500.0);		// max
@@ -1435,8 +1433,6 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 	const float RL_min_integral_limit = -100.0f;				// 최소 적분 한계값
 
 	int RL_count = 0;
-
-	float set_chamber_air = 0.0f;								// 초기 챔버 공압 설정값 (MPa)
 
 	// 데이터 기록 시작
 	//g_pDlg->m_flags.logThreadRunning.store(true);
@@ -1587,8 +1583,6 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 				g_pDlg->m_flags.flat_stop.store(false);
 			}
 
-			printf("P: %.3f, I: %.3f, D: %.3f | \n", debug_p, debug_i, debug_d);
-
 			// Control Step.0: 툴을 금형 시편에 접촉하기 위한 하강 동작
 			if (g_pDlg->m_setting.Control_Step == 0)
 			{
@@ -1679,7 +1673,7 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 
 					// PID 컨트롤러 리셋
 					g_pDlg->m_pidctrl.reset();
-					g_pDlg->m_setting.Target_Force_N.store(-40.0f);
+					g_pDlg->m_setting.Target_Force_N.store(-50.0f);
 
 					Status_gui_str.Format(_T("[평면 구동] Control Step 2: 평면 구동 & PID 힘 제어 시작"));
 					g_pDlg->var_status_gui.SetWindowTextW(Status_gui_str);
@@ -2083,7 +2077,7 @@ void CRobotCommSWDJv5Dlg::OnBnClickedButRobotDisconnect()
 void CRobotCommSWDJv5Dlg::OnBnClickedButHomeInit()
 {
 	//float pos_reset[6] = { 90.0, 0.0, 85.0, -5.0, 90.0, 90.0 };
-	float pos_reset[6] = { 90.0, 0.0, 90.0, 0.0, 80.0, -90.0 };
+	float pos_reset[6] = { 90.0, 0.0, 90.0, 0.0, 90.0, -90.0 };
 	int move_pos_reset = Drfl.movej(pos_reset, 5, 5);
 	if (move_pos_reset)
 	{
