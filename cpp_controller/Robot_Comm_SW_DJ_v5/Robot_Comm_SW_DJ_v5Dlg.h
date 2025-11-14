@@ -70,6 +70,8 @@ struct Setting {
 
 	int Control_Step = 0;									// 평면 구동 시 제어 스텝 카운터
 	std::atomic<bool> First_Contact{ false };				// 평면 구동 시 제어 스텝(Control_Step) 첫 실행 여부 확인용
+
+	float save_init_air = 0.0f;								// 초기 공압 설정값 (RL 테스트 저장용)
 };
 
 // 로봇 제어 관련 구조체 정의
