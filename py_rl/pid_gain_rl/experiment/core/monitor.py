@@ -50,6 +50,13 @@ class RLRealtimeMonitor:
         except Full:
             pass
 
+    def post_pi_output(self, t_sec: float, pi_output: float):
+        msg = {"type": "pi", "t": float(t_sec), "pi": float(pi_output)}
+        try:
+            self.q.put_nowait(msg)
+        except Full:
+            pass
+
     def _run(self):
         # 백엔드는 먼저 설정해야 함 (import 전에)
         import matplotlib
@@ -76,6 +83,7 @@ class RLRealtimeMonitor:
         print(f"[Monitor] Active backend: {matplotlib.get_backend()}")
         
         tbuf, cbuf, dbuf = [], [], []
+        latest_pi = None
         ep_idx, ep_rew = [], []
 
         if not tk_ok:
@@ -117,10 +125,22 @@ class RLRealtimeMonitor:
         axR.set_ylabel("Episode Reward", fontsize=10)
         axR.grid(True, alpha=0.3)
 
+        # Pressure annotation (outside plot, top-left of figure)
+        pressure_text = fig.text(
+            0.02,
+            0.97,
+            "Pressure: --- MPa",
+            fontsize=10,
+            fontweight="bold",
+            ha="left",
+            va="top",
+            bbox=dict(facecolor="white", alpha=0.7, edgecolor="none"),
+        )
+
         interval_ms = int(1000 / self.hz)
 
         def on_timer(_frame):
-            nonlocal tbuf, cbuf, dbuf
+            nonlocal tbuf, cbuf, dbuf, latest_pi
             while True:
                 try:
                     msg = self.q.get_nowait()
@@ -159,6 +179,8 @@ class RLRealtimeMonitor:
                 elif tp == "reward":
                     ep_idx.append(int(msg["ep"]))
                     ep_rew.append(float(msg["rew"]))
+                elif tp == "pi":
+                    latest_pi = float(msg["pi"])
 
             if len(tbuf) >= 2:
                 t = np.asarray(tbuf, dtype=float)
@@ -178,10 +200,12 @@ class RLRealtimeMonitor:
                 axR.autoscale_view()
                 axR.set_xlim(0, max(10, ep_idx[-1] + 1))
 
+            if latest_pi is not None:
+                pressure_text.set_text(f"Pressure: {latest_pi:.3f} MPa")
+
         # 애니메이션 객체를 변수에 저장 (GC 방지)
         ani = FuncAnimation(fig, on_timer, interval=interval_ms, blit=False)
         try:
             plt.show()
         except Exception:
             pass
-

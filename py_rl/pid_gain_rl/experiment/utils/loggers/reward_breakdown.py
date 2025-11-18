@@ -55,30 +55,59 @@ class RewardBreakdownLogger:
             }
         )
 
-    def save_episode_rewards(self, episode_rewards):
+    def _compute_moving_average(self, values, window):
+        if not values:
+            return []
+        window = max(1, int(window))
+        ma = []
+        for idx in range(len(values)):
+            start = max(0, idx - window + 1)
+            window_vals = values[start : idx + 1]
+            ma.append(float(np.mean(window_vals)))
+        return ma
+
+    def save_episode_rewards(self, episode_rewards, ma_window=50):
         """에피소드별 보상을 CSV로 저장"""
+        moving_avg = self._compute_moving_average(episode_rewards, ma_window)
         with open(self.episode_rewards_path, mode="w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["episode", "reward"])  # 헤더
+            writer.writerow(
+                ["episode", "reward", f"reward_ma_{ma_window}"]
+            )  # 헤더
             for i, reward in enumerate(episode_rewards, 1):
-                writer.writerow([i, float(reward)])
+                ma_val = moving_avg[i - 1] if moving_avg else float(reward)
+                writer.writerow([i, float(reward), ma_val])
 
-    def generate_episode_reward_graph(self, episode_rewards):
+    def generate_episode_reward_graph(self, episode_rewards, ma_window=50):
         """에피소드별 보상 그래프를 PNG로 저장"""
         if not episode_rewards:
             return
 
         try:
             episodes = list(range(1, len(episode_rewards) + 1))
+            moving_avg = self._compute_moving_average(
+                episode_rewards, ma_window
+            )
+
             plt.figure(figsize=(12, 6))
             plt.plot(
                 episodes,
                 episode_rewards,
-                "b-",
+                color="tab:blue",
                 linewidth=2,
                 marker="o",
                 markersize=4,
+                label="Episode Reward",
             )
+            if moving_avg:
+                plt.plot(
+                    episodes,
+                    moving_avg,
+                    color="tab:orange",
+                    linewidth=2.5,
+                    linestyle="-",
+                    label=f"Moving Avg (window={ma_window})",
+                )
             plt.xlabel("Episode", fontsize=18)
             plt.ylabel("Episode Reward", fontsize=18)
             plt.title(
@@ -87,14 +116,16 @@ class RewardBreakdownLogger:
             plt.tick_params(labelsize=15)  # 축 눈금 폰트 크기
             plt.grid(True, alpha=0.3)
             if len(episode_rewards) > 1:
-                avg_reward = np.mean(episode_rewards)
+                avg_reward = float(np.mean(episode_rewards))
                 plt.axhline(
                     y=avg_reward,
                     color="r",
                     linestyle="--",
                     alpha=0.7,
-                    label=f"Average: {avg_reward:.2f}",
+                    linewidth=1.5,
+                    label=f"Mean: {avg_reward:.2f}",
                 )
+            if len(plt.gca().get_lines()) > 0:
                 plt.legend()
 
             filename = os.path.join(self.log_dir, "episode_rewards.png")
@@ -263,8 +294,11 @@ class RewardBreakdownLogger:
         if force:
             # 에피소드별 보상 저장 및 그래프 생성
             if episode_rewards is not None:
-                self.save_episode_rewards(episode_rewards)
-                self.generate_episode_reward_graph(episode_rewards)
+                ma_window = 50
+                self.save_episode_rewards(episode_rewards, ma_window=ma_window)
+                self.generate_episode_reward_graph(
+                    episode_rewards, ma_window=ma_window
+                )
 
             # 🆕 보상 구성 요소 CSV 저장 및 그래프 생성
             if self.episode_components:

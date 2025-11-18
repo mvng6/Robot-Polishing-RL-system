@@ -33,12 +33,14 @@ python3 -m pid_gain_rl.experiment.config
 ### Method 2: CLI interface
 ```bash
 cd /home/katech/Robot-Polishing-RL-system/py_rl
-python3 -m pid_gain_rl.experiment.config.main --episodes 500 --target-force -40.0
+python3 -m pid_gain_rl.experiment.config.main --episodes 500 --target-force -50.0
 ```
 
 ## 📦 Dependencies
 
 - **Internal**: `core.env`, `utils.utils`, `utils.loggers`
 - **External**: `numpy`, `torch`
+
+
 
 

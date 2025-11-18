@@ -113,6 +113,7 @@ class ControlPerformanceLogger:
             "band_ratio": self._calculate_success_rate(),            # Band Ratio (목표 범위 내 유지 비율)
             "error_variance": self._calculate_error_variance(),     # Error Variance
         }
+        metrics["success_rate"] = metrics["band_ratio"]
 
         self.episode_metrics.append(metrics)
         return metrics
@@ -139,7 +140,7 @@ class ControlPerformanceLogger:
         ):
             return None
 
-        target = self.target_data[0]  # -40N
+        target = self.target_data[0]  # default -50N
         force_array = np.array(self.force_data)
         time_array = np.array(self.time_data)
 
@@ -190,7 +191,7 @@ class ControlPerformanceLogger:
         if not self.force_data or not self.target_data:
             return None
 
-        target = self.target_data[0]  # -40N
+        target = self.target_data[0]  # default -50N
         force_array = np.array(self.force_data)
 
         # 목표값보다 더 나쁜 방향으로의 최대 편차 계산
@@ -240,7 +241,7 @@ class ControlPerformanceLogger:
         """Success Rate 계산 - 목표 범위 내 유지 비율"""
         if not self.force_data or not self.target_data or not self.time_data:
             return None
-        target = self.target_data[0]  # -40N
+        target = self.target_data[0]  # default -50N
         tolerance = (
             abs(target) * 0.02
         )  # ±2% 오차 범위 (±0.8N) - 더 엄격한 기준
@@ -344,6 +345,7 @@ class ControlPerformanceLogger:
             "total_variation": "N",
             # 안정성 지표
             "band_ratio": "-",
+            "success_rate": "-",
             "error_variance": "N²",
         }
         return units.get(metric_name, "")
@@ -363,6 +365,7 @@ class ControlPerformanceLogger:
             "total_variation": "Total Variation - 총 변화량 (밸브 마모)",
             # 안정성 지표
             "band_ratio": "Band Ratio - 목표 범위 내 유지 비율",
+            "success_rate": "Success Rate - 목표 범위 내 유지 비율 (동일 지표)",
             "error_variance": "Error Variance - 오차 분산 (안정성)",
         }
         return descriptions.get(metric_name, "")
@@ -388,6 +391,8 @@ class ControlPerformanceLogger:
             "total_variation",
             # 안정성 지표 (2개)
             "band_ratio",
+            "success_rate",
+            "success_rate",
             "error_variance",
         ]
 
@@ -493,6 +498,7 @@ class ControlPerformanceLogger:
             "input_rms",
             "total_variation",
             "band_ratio",
+            "success_rate",
             "error_variance",
         ]
 

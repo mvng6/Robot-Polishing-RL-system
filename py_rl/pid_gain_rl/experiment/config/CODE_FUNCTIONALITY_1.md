@@ -126,7 +126,7 @@ python3 -m pid_gain_rl
    - `--lr`: 기본 학습률 (기본: 1e-4)
    - `--lr-actor`: Actor 학습률 (기본: 1e-4)
    - `--lr-critic`: Critic 학습률 (기본: 2e-4)
-   - `--target-force`: 목표 힘 (기본: -40.0)
+   - `--target-force`: 목표 힘 (기본: -50.0)
    - `--episode-seconds`: 에피소드 길이 (기본: 10.0)
    - `--recv-freq`: 수신 주파수 (기본: 1000)
    - `--load-model`: 로드할 모델 경로 (.pth 파일)
@@ -186,7 +186,7 @@ python3 -m pid_gain_rl
 
 ```bash
 cd /home/katech/Robot-Polishing-RL-system/py_rl/pid_gain_rl
-python3 main.py --episodes 500 --target-force -40.0 --batch-size 64
+python3 main.py --episodes 500 --target-force -50.0 --batch-size 64
 ```
 
 ---
@@ -206,7 +206,7 @@ python3 main.py --episodes 500 --target-force -40.0 --batch-size 64
 **필드 구성**:
 
 1. **신경망 설정**
-   - `state_dim`: 상태 차원 (기본: 12, 실제로는 20차원으로 동적 설정됨)
+   - `state_dim`: 상태 차원 (6차원, 현재 힘/오차/PI 출력 기반)
    - `action_dim`: 액션 차원 (기본: 3)
    - `hidden_dim`: 은닉층 크기 (기본: 128)
    - `lr`: 기본 학습률 (기본: 1e-4)
@@ -218,13 +218,13 @@ python3 main.py --episodes 500 --target-force -40.0 --batch-size 64
 
 2. **PID 설정**
    - `pid_range`: PID 범위 딕셔너리
-     - `Kp`: (3.0, 40.0)
-     - `Ki`: (0.0, 40.0)
-     - `Kd`: (1e-4, 5e-2)
+    - `Kp`: (3.0, 80.0)
+    - `Ki`: (10.0, 100.0)
+   - `Kd`: (0.0, 1e-2)
 
 3. **에피소드 설정**
    - `episode_seconds`: 에피소드 길이 (기본: 10.0초)
-   - `target_force`: 목표 힘 (기본: -40.0N)
+   - `target_force`: 목표 힘 (기본: -50.0N)
    - `updates_per_episode`: 에피소드당 업데이트 횟수 (기본: 35)
    - `episodes`: 총 에피소드 수 (기본: 500)
 
@@ -319,7 +319,7 @@ DEFAULT_HIDDEN_DIM = 128
 DEFAULT_LR = 1e-4
 DEFAULT_LR_ACTOR = 1e-4
 DEFAULT_LR_CRITIC = 2e-4
-DEFAULT_GAMMA = 0.99
+DEFAULT_GAMMA = 0.98
 DEFAULT_TAU = 0.01
 ```
 
@@ -328,29 +328,23 @@ DEFAULT_TAU = 0.01
 - `DEFAULT_LR`: 기본 학습률 (1e-4)
 - `DEFAULT_LR_ACTOR`: Actor 학습률 (1e-4)
 - `DEFAULT_LR_CRITIC`: Critic 학습률 (2e-4, Actor보다 2배)
-- `DEFAULT_GAMMA`: 할인율 (0.99)
+- `DEFAULT_GAMMA`: 할인율 (0.98)
 - `DEFAULT_TAU`: Soft update 계수 (0.01)
 
 #### 4.2 PID 범위
 
 ```python
 DEFAULT_PID_RANGE = {
-    "Kp": (3.0, 40.0),      # 하한 확장: 35 → 3 (오버슈트 억제)
-    "Ki": (0.0, 40.0),      # 하한 0까지, 상한 낮춤: 55 → 40 (조건부 적분 off 가능)
-    "Kd": (1e-4, 5e-2),     # 대폭 확장: 1e-6~1e-3 → 1e-4~5e-2 (댐핑 효과)
+    "Kp": (3.0, 80.0),
+    "Ki": (10.0, 100.0),
+    "Kd": (0.0, 1e-2),
 }
 ```
 
 **설명**:
-- **Kp**: 비례 게인 범위 (3.0 ~ 40.0)
-  - 하한 35 → 3으로 확장 (오버슈트 억제)
-- **Ki**: 적분 게인 범위 (0.0 ~ 40.0)
-  - 하한 0 포함 (조건부 적분 off 가능)
-  - 상한 55 → 40으로 낮춤 (과도한 적분 누적 방지)
-- **Kd**: 미분 게인 범위 (1e-4 ~ 5e-2)
-  - 대폭 확장 (1e-6~1e-3 → 1e-4~5e-2)
-  - 댐핑 효과 확보
-  - 로그 스케일로 매핑됨
+- **Kp**: 비례 게인 범위 (3.0 ~ 80.0) — 더 넓은 탐색을 위해 상한 확대
+- **Ki**: 적분 게인 범위 (10.0 ~ 100.0) — 하한을 10.0으로 올려 최소 적분 확보
+- **Kd**: 미분 게인 범위 (0.00 ~ 0.01) — 작은 범위/0 포함 시 선형 매핑, 0.001 단위 양자화
 
 #### 4.3 통신 기본 설정
 
@@ -360,7 +354,7 @@ DEFAULT_BATCH_SIZE = 64
 DEFAULT_EPISODES = 500
 MIN_EPISODES_FOR_SAVING = 50
 DEFAULT_EPISODE_SECONDS = 10.0
-DEFAULT_TARGET_FORCE = -40.0
+DEFAULT_TARGET_FORCE = -60.0
 DEFAULT_UPDATES_PER_EPISODE = 35
 ```
 
@@ -370,7 +364,7 @@ DEFAULT_UPDATES_PER_EPISODE = 35
 - `DEFAULT_EPISODES`: 기본 에피소드 수 (500)
 - `MIN_EPISODES_FOR_SAVING`: 모델 저장 시작 에피소드 (50, 초반 lucky reward 방지)
 - `DEFAULT_EPISODE_SECONDS`: 에피소드 길이 (10.0초)
-- `DEFAULT_TARGET_FORCE`: 목표 힘 (-40.0N)
+- `DEFAULT_TARGET_FORCE`: 목표 힘 (-60.0N)
 - `DEFAULT_UPDATES_PER_EPISODE`: 에피소드당 업데이트 횟수 (35, 세그먼트 분할 대응)
 
 #### 4.4 통신 설정
@@ -441,119 +435,52 @@ WARM_START_NUM_SAMPLES = 50
 - `WARM_START_ENABLED`: Warm-start 활성화 여부 (True)
 - `WARM_START_NUM_SAMPLES`: LHS 샘플 수 (50개, 30~50 범위)
 
-#### 4.9 세그먼트용 보상 파라미터 조정
+#### 4.9 초기 접촉 설정
 
 ```python
-SHAPING_WARMUP_S = 0.2  # 0.5 → 0.2 (세그먼트용)
-SETTLING_HOLD_TIME_S = 0.5  # 1.0 → 0.5 (세그먼트용)
+INITIAL_CONTACT_FORCE = -45.0
+INITIAL_PI_OUTPUT = 0.05
 ```
 
 **설명**:
-- `SHAPING_WARMUP_S`: PBRS warmup 시간 (0.2초, 세그먼트용으로 축소)
-- `SETTLING_HOLD_TIME_S`: 정착 시간 hold 시간 (0.5초, 세그먼트용으로 축소)
+- `INITIAL_CONTACT_FORCE`: 로봇이 강화학습 시작 시 유지하는 초기 접촉력 (-45N)
+- `INITIAL_PI_OUTPUT`: 초기 공압 툴 압력 (0.05MPa, 상태 벡터의 PI 출력 초기값)
 
-#### 4.10 제어 물리 상수
+#### 4.10 보상 및 안전 파라미터
 
 ```python
+SETTLING_HOLD_TIME_S = 0.5
+REWARD_MIN = -1.0
+REWARD_MAX = 1.0
+REWARD_ERROR_REF_PERCENT = 100.0
 BAND_TOLERANCE_N = 1.5
-SETTLING_BAND_TOLERANCE = 1.0
 SAFETY_FORCE_LIMIT = 100.0
 SAFETY_FORCE_PENALTY = -1.0
-PI_OUTPUT_MAX = 0.4
-PI_OUTPUT_SAT_THRESHOLD = 0.95
+BAND_RATIO_TOLERANCE = 0.05
 ```
 
 **설명**:
+- `SETTLING_HOLD_TIME_S`: 정착 판정을 위한 최소 밴드 유지 시간 (0.5초)
+- `REWARD_MIN`, `REWARD_MAX`: 보상 클리핑 범위 ([-1, 1])
+- `REWARD_ERROR_REF_PERCENT`: 평균 힘 오차가 100%일 때 보상 -1이 되도록 선형 스케일 기준
 - `BAND_TOLERANCE_N`: 밴드 허용 오차 (±1.5N)
-- `SETTLING_BAND_TOLERANCE`: 정착 시간 밴드 허용 오차 (±1.0N)
 - `SAFETY_FORCE_LIMIT`: 안전 힘 한계 (±100N)
-- `SAFETY_FORCE_PENALTY`: 안전 위반 패널티 (-1.0)
-- `PI_OUTPUT_MAX`: PI 출력 최대값 (0.4)
-- `PI_OUTPUT_SAT_THRESHOLD`: PI 출력 포화 임계값 (0.95)
+- `SAFETY_FORCE_PENALTY`: 안전 위반 시 부여되는 패널티 (-1.0)
+- `BAND_RATIO_TOLERANCE`: 밴드 유지율 계산 시 허용 비율 (±5%)
 
-#### 4.11 스코어화 기반 보상 시스템
+#### 4.11 탐색/탐욕 비율 설정
 
 ```python
-SCORE_TAU_TS = 5.0
-SCORE_TAU_MP_PERCENT = 8.0  # 12.0 → 8.0 (오버슈트 더 민감하게)
-SCORE_TAU_ESS_N = 1.0
-SCORE_TAU_U = 0.5
-
-SCORE_W_TS   = 0.30
-SCORE_W_MP   = 0.35  # 0.25 → 0.35 (오버슈트 가중치 강화)
-SCORE_W_ESS  = 0.20
-SCORE_W_BAND = 0.15
-SCORE_W_U    = 0.05
-SCORE_W_FAIL = 0.15
-SCORE_W_PBRS = 0.10
+ACTOR_LOG_STD_MAX = -0.3
+ACTOR_LOG_STD_MIN = -2.5
+ACTOR_INITIAL_ALPHA = 0.1
 ```
 
 **설명**:
-- **TAU 값들**: 지수 스코어 변환 시 시상수
-  - `SCORE_TAU_TS`: 정착시간 시상수 (5.0초)
-  - `SCORE_TAU_MP_PERCENT`: 오버슈트 시상수 (8.0%, 더 민감하게)
-  - `SCORE_TAU_ESS_N`: 정상상태 오차 시상수 (1.0N)
-  - `SCORE_TAU_U`: 제어 노력 시상수 (0.5)
-- **W 값들**: 보상 가중치
-  - `SCORE_W_TS`: 정착시간 가중치 (0.30)
-  - `SCORE_W_MP`: 오버슈트 가중치 (0.35, 강화됨)
-  - `SCORE_W_ESS`: 정상상태 오차 가중치 (0.20)
-  - `SCORE_W_BAND`: 밴드 유지 가중치 (0.15)
-  - `SCORE_W_U`: 제어 노력 가중치 (0.05)
-  - `SCORE_W_FAIL`: 추종 실패 패널티 가중치 (0.15)
-  - `SCORE_W_PBRS`: PBRS 가중치 (0.10)
+- `ACTOR_LOG_STD_MAX`, `ACTOR_LOG_STD_MIN`: 정책 노이즈(log_std)의 상·하한
+- `ACTOR_INITIAL_ALPHA`: 자동 엔트로피 튜닝 시 초기 entropy 계수 (0.1)
 
-#### 4.12 초기 구간 피크 패널티 설정
-
-```python
-EARLY_PEAK_TIME_WINDOW = 0.5  # 0~0.5초 구간
-EARLY_PEAK_PENALTY_SCALE = 0.2  # 패널티 스케일
-EARLY_PEAK_PENALTY_MAX = 0.2  # 상한 (0.15~0.2)
-```
-
-**설명**:
-- `EARLY_PEAK_TIME_WINDOW`: 초기 구간 시간 창 (0.5초)
-- `EARLY_PEAK_PENALTY_SCALE`: 패널티 스케일 (0.2)
-- `EARLY_PEAK_PENALTY_MAX`: 패널티 상한 (0.2)
-
-#### 4.13 추종 실패 임계값
-
-```python
-TRACKING_FAIL_RMSE_THRESHOLD = 5.0
-TRACKING_FAIL_BAND_RATIO = 0.3
-```
-
-**설명**:
-- `TRACKING_FAIL_RMSE_THRESHOLD`: RMSE 임계값 (5.0N)
-- `TRACKING_FAIL_BAND_RATIO`: 밴드 비율 임계값 (0.3)
-
-#### 4.14 오버슈트 임계값
-
-```python
-OVERSHOOT_THRESHOLD_MILD = 5.0
-OVERSHOOT_THRESHOLD_MODERATE = 15.0
-OVERSHOOT_THRESHOLD_SEVERE = 30.0
-```
-
-**설명**:
-- 경미/중간/심각 오버슈트 구분 (레거시, 현재 미사용)
-
-#### 4.15 탐색/탐욕 비율 설정
-
-```python
-ACTOR_LOG_STD_MAX = -0.3  # -1.0 → -0.3 (더 큰 탐색 범위)
-ACTOR_LOG_STD_MIN = -2.5  # 하한 보장
-ACTOR_INITIAL_ALPHA = 0.1  # 0.02 → 0.1 (더 큰 초기값)
-ACTOR_WEIGHT_GAIN = 0.05  # 0.5 → 0.05 (안정화)
-```
-
-**설명**:
-- `ACTOR_LOG_STD_MAX`: Actor log_std 상한 (-0.3, σ ≤ 0.74)
-- `ACTOR_LOG_STD_MIN`: Actor log_std 하한 (-2.5)
-- `ACTOR_INITIAL_ALPHA`: 초기 entropy 계수 (0.1)
-- `ACTOR_WEIGHT_GAIN`: 가중치 초기화 gain (0.05, Fine-tuning용)
-
-#### 4.16 표준편차 Annealing 설정
+#### 4.12 표준편차 Annealing 설정
 
 ```python
 STD_ANNEAL_START_EPISODE = 0
@@ -569,7 +496,7 @@ STD_ANNEAL_FINAL = 0.5  # 0.3 → 0.5 (덜 축소, 탐색 유지)
 - `STD_ANNEAL_FINAL`: 최종 std_scale (0.5)
 - 선형 감소: 1.0 → 0.5 (0~150 에피소드)
 
-#### 4.17 Target Entropy 동적 조정 설정
+#### 4.13 Target Entropy 동적 조정 설정
 
 ```python
 TARGET_ENTROPY_INITIAL_FACTOR = -1.2  # 초기 100ep: 더 공격적 탐색
@@ -583,21 +510,10 @@ TARGET_ENTROPY_TRANSITION_EPISODES = 100  # 전환 에피소드 수
 - `TARGET_ENTROPY_TRANSITION_EPISODES`: 전환 에피소드 수 (100)
 - 초기 100ep: -1.2×action_dim, 이후: -1.0×action_dim
 
-#### 4.18 레거시 보상 함수 파라미터 (미사용)
+#### 4.14 레거시 보상 파라미터
 
-```python
-TAU_RMSE = 2.5
-TAU_SETTLE = 5.0
-TAU_VAR = 0.15
-TAU_U = 1.0
-TAU_DU = 1.0
-POTENTIAL_GAMMA = 0.99
-REWARD_WEIGHT_PROGRESS = 0.05
-REWARD_MIN = -100.0
-REWARD_MAX = 50.0
-```
-
-**설명**: 레거시 코드 호환성 유지용 (현재 미사용)
+- 과거 복합 보상 로직에서 사용되던 상수들은 삭제되었습니다.
+- 필요 시 `past_version/` 폴더의 히스토리를 참고하세요.
 
 ---
 
@@ -621,4 +537,3 @@ REWARD_MAX = 50.0
 ---
 
 **다음**: CODE_FUNCTIONALITY_2.md - 핵심 RL 모듈 (agent, env, comm, monitor)
-

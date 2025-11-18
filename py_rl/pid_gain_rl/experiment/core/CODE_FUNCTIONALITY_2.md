@@ -22,7 +22,7 @@
 **역할**: 정책 네트워크 (Policy Network)
 
 **구조**:
-- 입력: `state_dim` 차원 (20차원)
+- 입력: `state_dim` 차원 (6차원)
 - 은닉층: 2층 MLP (128-128)
 - 출력:
   - `mean`: 액션 평균 (3차원: Kp, Ki, Kd)
@@ -32,12 +32,12 @@
 
 1. **`__init__()`**
    - `log_std_min=-2.5`, `log_std_max=-0.3` 설정
-   - 가중치 초기화: `ACTOR_WEIGHT_GAIN=0.05` (Fine-tuning용)
+   - 가중치 초기화: ReLU 친화적인 Kaiming Uniform 적용 (기본값으로 회귀)
 
 2. **`forward(state)`**
    - 입력: 상태 벡터
    - 출력: `mean`, `log_std`
-   - `mean`: [-10.0, 10.0]로 클리핑
+   - `mean`: MLP 출력 그대로 사용 (tanh에서 자연스럽게 [-1, 1] 제한)
    - `log_std`: [log_std_min, log_std_max]로 클리핑
 
 3. **`sample(state, std_scale=1.0)`**
@@ -50,8 +50,8 @@
 
 **역할**: Q-값 네트워크 (Twin Q-Networks)
 
-**구조**:
-- 입력: `state_dim + action_dim` (20 + 3 = 23차원)
+- **구조**:
+- 입력: `state_dim + action_dim` (6 + 3 = 9차원)
 - 은닉층: 2층 MLP (128-128)
 - 출력: Q1, Q2 (각각 1차원)
 
@@ -60,6 +60,7 @@
 1. **`forward(state, action)`**
    - 상태와 액션을 concat하여 입력
    - Q1, Q2 반환 (Twin Q-Networks)
+   - 모든 Linear 층은 Kaiming Uniform으로 초기화 (ReLU 친화적)
 
 #### 1.3 `ReplayBuffer` 클래스
 
@@ -95,7 +96,7 @@
    - `alpha_opt`: Entropy 계수 옵티마이저 (자동 튜닝 시)
 
 3. **하이퍼파라미터**:
-   - `gamma`: 할인율 (0.99)
+   - `gamma`: 할인율 (0.98)
    - `tau`: Soft update 계수 (0.01)
    - `alpha`: Entropy 계수 (초기: 0.1, 자동 튜닝)
 
@@ -135,23 +136,22 @@
 
 6. **`store_transition(state, action, reward, next_state, done)`**
    - Transition 저장
-   - NaN/Inf 검증
-   - 보상 클리핑 (-100.0 ~ 50.0)
-   - PID gain 정규화 ([-1, 1] 범위)
+    - NaN/Inf 검증
+   - 보상 범위: `Constants.REWARD_MIN`~`Constants.REWARD_MAX` (퍼센트 오차 스케일에 맞춤)
+   - PID gain 정규화 ([-1, 1] 범위) — Kp/Ki/Kd 모두 0.01 단위 양자화(소수 둘째 자리)
 
 7. **`update_parameters_one_step(batch_size=None, num_updates=128)`**
-   - **SAC 업데이트**
-   - Critic 업데이트 (Q1, Q2)
-   - Actor 업데이트 (정책)
-   - Entropy 자동 튜닝 (선택적)
-   - Target Critic Soft Update (tau=0.01)
+   - **SAC 업데이트 (TD 부트스트랩 적용)**
+   - Critic: `r + γ(1-d)(min(Q_target) - α log π)` 타깃으로 MSE 학습
+   - Actor: KL-regularized 정책 업데이트 (entropy 항 포함)
+   - 자동 엔트로피 튜닝 및 Target Critic Soft Update (tau=0.01)
    - Gradient clipping (2.0)
 
 8. **`warm_start_buffer(num_samples=None)`**
    - **Warm-start 버퍼 초기화**
    - Latin Hypercube Sampling (LHS) 사용
    - Kp, Ki: 선형 샘플링
-   - Kd: 로그 스케일 샘플링
+   - Kd: 로그 스케일 샘플링 (안정적인 최소 양수값 확보)
    - 더미 transition 저장 (50개 샘플)
 
 9. **`log_exploration_metrics(episode_num)`**
@@ -188,7 +188,7 @@
 
 1. **설정**:
    - `cfg`: 설정 딕셔너리
-   - `STATE_DIM`: 20차원 강제 설정 (12 + 8)
+   - `STATE_DIM`: 6차원 강제 설정 (현재 힘, 목표 힘, 오차, 오차 미분/적분, PI 출력)
 
 2. **컴포넌트**:
    - `agent`: SAC 에이전트
@@ -210,97 +210,30 @@
 
 #### 2.2 보상 계산 (`calculate_episode_reward`)
 
-**역할**: 복합 보상 함수 계산
+**역할**: 힘 오차 기반 단순 보상 계산
 
-**단계**:
+**주요 로직**:
+1. 입력 검증 후 힘 배열, 목표 힘, 에피소드 길이 확보
+2. 평균 힘 오차 및 평균 힘 오차(%) 계산
+3. `REWARD_ERROR_REF_PERCENT` 대비 평균 오차 비율을 선형 스케일링  
+   - 평균 오차 % = 0 → 보상 1  
+   - 평균 오차 % = 기준값의 절반 → 보상 0  
+   - 평균 오차 % = 기준값 → 보상 -1 (그 이상은 하한에서 포화)
+4. 추가 메트릭 산출
+   - `rmse`, `rmse_pct`, `overshoot`, `settling_time`
+   - `band_ratio`, `band_time`, `out_of_band_time`, `pi_rms`
+5. 로깅 호환성을 위해 `reward_score`, `r_centered`, `r_baseline` 등을 함께 반환
 
-1. **입력 검증 및 기본값**
-   - `force_data`, `target_force`, `episode_len_s` 검증
+#### 2.3 세그먼트 상태 생성 (`_build_segment_state`)
 
-2. **핵심 지표 계산**:
-   - **RMSE**: 전체 추종 오차
-   - **초기 구간 피크 패널티**: 0~0.5초 구간 전용
-   - **Overshoot**: % 단위로 일관화
-   - **밴드 유지율**: ±1.5N 범위 내 유지 비율
-   - **정착시간**: 연속 유지 기준 (2초)
-   - **정상상태 오차 (ESS)**: 마지막 10% 구간 평균
-   - **제어 입력 품질**: u_rms 정규화
-
-3. **PBRS (Potential-Based Reward Shaping)**:
-   - Potential 함수: `-abs(errors) / T_abs`
-   - 개선분: `gamma * phi[1:] - phi[:-1]`
-   - 양수만 사용 (개선 신호만)
-
-4. **추종 실패 패널티**:
-   - RMSE 기준: `(rmse - threshold) / threshold`
-   - 밴드 비율 기준: `(threshold - band_ratio) / threshold`
-   - 최대값 사용
-
-5. **연속형 스코어 (0~1)**:
-   - `S_ts = exp(-settling_time / tau_settle)`
-   - `S_mp = exp(-overshoot_pct / tau_mp)`
-   - `S_ess = exp(-abs(ess) / tau_ess)`
-   - `S_band = band_ratio`
-   - `S_u = exp(-u_rms_n / tau_u)`
-
-6. **기준선 대비 개선량 (EWMA)**:
-   - 기준선: `_baseline` (ts, mp, ess_abs)
-   - 개선량: `(baseline - current) / tau`
-   - EWMA 업데이트: `α=0.1` (최근 10개 에피소드)
-
-7. **통합 보상 스코어 (0~1)**:
-   ```
-   reward_score = 0.30*S_ts + 0.35*S_mp + 0.20*S_ess + 0.15*S_band
-                  + 0.05*S_u - 0.15*P_fail + 0.10*progress
-                  + 0.10*I_improve - early_peak_penalty
-   ```
-
-8. **중심화 + tanh 소프트클립**:
-   - 기준선: `_rew_baseline` (EWMA, β=0.99)
-   - 중심화: `r_centered = reward_score - baseline`
-   - tanh 클리핑: `reward = tanh(2.0 * r_centered)`
-   - 최종 범위: [-1.0, 1.0]
-
-9. **안전 위반 하드 패널티**:
-   - 힘 > ±100N → `reward = -1.0`
-
-10. **메트릭 반환**:
-    - 기본 지표 (rmse, overshoot, settling_time 등)
-    - 디버깅 정보 (reward_score, r_centered, r_baseline 등)
-
-#### 2.3 초기 구간 피크 패널티 (`_calculate_early_peak_penalty`)
-
-**역할**: 초기 구간 (0~0.5초) 피크 감지 및 패널티
-
-**로직**:
-1. 0~0.5초 구간 추출
-2. 목표값보다 더 나쁜 방향으로의 최대 편차 계산
-3. 패널티: `min(penalty_scale * peak_ratio, max_penalty)`
-4. 상한: 0.2
-
-#### 2.4 세그먼트 상태 생성 (`_build_segment_state`)
-
-**역할**: 세그먼트별 20차원 상태 벡터 생성
+**역할**: 세그먼트별 6차원 상태 벡터 생성
 
 **구성**:
+- 세그먼트 마지막 샘플의 센서 값을 그대로 사용  
+  `[현재힘, 목표힘, 힘 오차, 오차 미분, 오차 적분, PI 출력]`
+- 데이터가 없을 경우 영벡터 반환
 
-1. **기존 12차원**:
-   - 로봇PC 6차원: Kp, Ki, Kd, prev_reward, target_force, segment_len_s
-   - 강화학습PC 6차원: force 평균, std, min, max, error 평균, std
-
-2. **궤적 요약 8차원**:
-   - `overshoot`: 오버슈트 (%)
-   - `settling_time`: 정착시간 (초)
-   - `rmse`: RMSE
-   - `band_ratio`: 밴드 유지 비율
-   - `oscillation_freq`: 진동 주파수 (FFT)
-   - `oscillation_amp`: 진동 진폭 (FFT)
-   - `rise_time`: 상승 시간 (10% → 90%)
-   - `steady_state_error`: 정상상태 오차
-
-**NaN/Inf 가드**: 모든 값이 NaN/Inf가 아니도록 보장
-
-#### 2.5 메인 학습 루프 (`run_pid_optimization_training`)
+#### 2.4 메인 학습 루프 (`run_pid_optimization_training`)
 
 **역할**: 전체 강화학습 루프 실행
 
@@ -324,14 +257,15 @@
    - **안전 위반 체크**: 힘 > ±100N → 조기 종료
    - **세그먼트 분할**: 5개 세그먼트 (2초씩)
    - **세그먼트별 보상 계산**: 각 세그먼트 보상 계산
-   - **세그먼트별 상태 생성**: 20차원 상태 벡터
+   - **세그먼트별 상태 생성**: 6차원 상태 벡터
    - **리플레이 버퍼 저장**: 세그먼트별 transition 저장
+   - **10-episode 로그**: 매 10번째 에피소드마다 `control_log/`에 힘 궤적 그래프(PNG)와 raw CSV 저장
    - **표준편차 Annealing 업데이트**
    - **Target Entropy 동적 조정**
    - **학습**: 버퍼 크기 >= 32일 때 업데이트 (35회)
    - **최고 성능 모델 저장**: 50 에피소드 이후 최고 보상만 저장
    - **다음 PID 계산**: 다음 에피소드 PID 미리 계산
-   - **에피소드 완료 신호 전송**: episode_done=True + 다음 PID
+   - **에피소드 완료 신호 전송**: episode_done=True + 다음 PID (Kp, Ki, Kd 모두 전송)
    - **로봇 리셋 대기**: 2초 대기 (모니터링 지속)
 
 5. **최종 처리**:
@@ -340,7 +274,7 @@
    - 학습 완료 신호 전송
    - 모니터 종료
 
-#### 2.6 기타 메서드
+#### 2.5 기타 메서드
 
 1. **`is_episode_done(force_data, target_force)`**
    - 에피소드 종료 조건 확인 (시간 기반)
@@ -350,6 +284,11 @@
 
 3. **`generate_episode_reward_graph()`**
    - 에피소드별 보상 그래프 생성
+
+4. **`_export_control_trace(episode_num, force_series, state_history)`**
+   - 10 에피소드마다 현재 힘/목표 힘 데이터를 0~10초 범위로 시각화
+   - `learning_done_*/control_log/`에 그래프(PNG)와 동일 구간 CSV(`time_s`, `current_force_N`, `target_force_N`) 저장
+   - 현재 힘은 검은 실선, 목표 힘은 붉은 점선으로 표시하며 모든 레이블은 영문
 
 ---
 
@@ -469,13 +408,17 @@
 5. **`post_reward(episode, reward)`**
    - 보상 데이터 전송 (Queue 사용)
 
-6. **`_run()`**
+6. **`post_pi_output(t_sec, pi_output)`**
+   - 실시간 압력(PI 출력) 데이터 전송
+
+7. **`_run()`**
    - **실제 모니터링 GUI 실행**
    - 백엔드 설정 (TkAgg 또는 Agg)
    - matplotlib FuncAnimation 사용
-   - 2개 서브플롯:
+   - Force/Reward 2개 서브플롯 + Force 영역 안쪽 텍스트
      - **Force subplot**: 현재 힘 vs 목표 힘
      - **Reward subplot**: 에피소드별 보상
+   - Force subplot 왼쪽 상단에 `Pressure: {value} MPa` 텍스트 업데이트
    - 롤링 윈도우 처리 (30초)
    - 10 Hz 업데이트
 
@@ -491,14 +434,16 @@
 ### Agent 모듈
 - **Actor**: 정책 네트워크 (128-128 MLP, std_scale 지원)
 - **Critic**: Twin Q-Networks (128-128 MLP)
-- **ReplayBuffer**: 경험 리플레이 버퍼 (10000 크기)
+- **ReplayBuffer**: 경험 리플레이 버퍼 (기본 10000)
 - **SAC 알고리즘**: 표준편차 Annealing, Target Entropy 동적 조정, Warm-start
+- **PID 스케일링**: Kd 로그 스케일 일관화, PID 게인은 0.01 단위 양자화(소수 둘째 자리), 보상은 `[-1, 1]` 범위로 클리핑
 
 ### Environment 모듈
-- **복합 보상 함수**: 스코어화 + PBRS + 기준선 중심화 + tanh 클리핑
-- **세그먼트 분할**: 5개 세그먼트 (2초씩)
-- **20차원 상태**: 기존 12차원 + 궤적 요약 8차원
-- **안전 위반 처리**: 힘 > ±100N → 조기 종료
+- **보상 함수**: 평균 힘 오차(%) 기반 단순 선형 보상 (0%→1, 100%→-1)
+- **세그먼트 분할**: 5개 세그먼트 (2초씩, 총 10초)
+- **6차원 상태**: 현재 힘/목표 힘/오차/오차 미분·적분/PI 출력
+- **안전 위반 처리**: 힘 > ±100N → 즉시 종료 및 패널티
+- **로그 관리**: 매 10번째 에피소드마다 `control_log/`에 힘 궤적 그래프·CSV 저장
 
 ### Communication 모듈
 - **1kHz 정확 수신**: 주기 고정 방식
@@ -506,7 +451,7 @@
 - **CRC16 체크섬**: 패킷 검증
 
 ### Monitor 모듈
-- **실시간 GUI**: matplotlib 기반
+- **실시간 GUI**: matplotlib 기반 (Force / Episode Reward / Pressure 3중 표시)
 - **롤링 윈도우**: 최근 30초 데이터
 - **비동기 처리**: 별도 프로세스
 

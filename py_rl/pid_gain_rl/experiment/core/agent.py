@@ -8,6 +8,7 @@ SAC Agent - Actor, Critic, ReplayBuffer, PIDGainSACAgent
 - Warm-start 버퍼 초기화 (LHS 샘플링)
 """
 import os
+import math
 import random
 import numpy as np
 import torch
@@ -36,19 +37,19 @@ class Actor(nn.Module):
         self._init_weights()
 
     def _init_weights(self):
-        """Fine-tuning용 안정적 가중치 초기화"""
+        """ReLU 활성화에 적합한 Kaiming 초기화 적용"""
         for m in self.modules():
             if isinstance(m, nn.Linear):
-                # 🔥 0.5 → 0.05 (Fine-tuning용)
-                nn.init.orthogonal_(m.weight, gain=Constants.ACTOR_WEIGHT_GAIN)
+                nn.init.kaiming_uniform_(m.weight, a=math.sqrt(5))
                 if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
+                    fan_in, _ = nn.init._calculate_fan_in_and_fan_out(m.weight)
+                    bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0.0
+                    nn.init.uniform_(m.bias, -bound, bound)
 
     def forward(self, state):
         x = F.relu(self.fc1(state))
         x = F.relu(self.fc2(x))
         mean = self.mean_head(x)
-        mean = torch.clamp(mean, -10.0, 10.0)
         log_std = torch.clamp(
             self.log_std_head(x), self.log_std_min, self.log_std_max
         )
@@ -89,9 +90,11 @@ class Critic(nn.Module):
     def _init_weights(self):
         for m in self.modules():
             if isinstance(m, nn.Linear):
-                nn.init.orthogonal_(m.weight, gain=Constants.ACTOR_WEIGHT_GAIN)
+                nn.init.kaiming_uniform_(m.weight, a=math.sqrt(5))
                 if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
+                    fan_in, _ = nn.init._calculate_fan_in_and_fan_out(m.weight)
+                    bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0.0
+                    nn.init.uniform_(m.bias, -bound, bound)
 
     def forward(self, state, action):
         sa = torch.cat([state, action], 1)
@@ -142,6 +145,11 @@ class PIDGainSACAgent:
         self.alpha = Constants.ACTOR_INITIAL_ALPHA  # 0.1 (업데이트됨)
         self.auto_entropy_tuning = cfg["AUTO_ENTROPY"]
         
+        # 학습률 스케줄용 원본 값 저장
+        self.base_lr_actor = cfg.get("LR_ACTOR", cfg["LR"])
+        self.base_lr_critic = cfg.get("LR_CRITIC", cfg["LR"])
+        self.lr_scaled = False  # 한 번만 스케일링
+        
         # 🆕 표준편차 Annealing 상태
         self.current_episode = 0
         self.std_scale = Constants.STD_ANNEAL_INITIAL  # 1.0
@@ -158,8 +166,8 @@ class PIDGainSACAgent:
         self.critic_target = Critic(s_dim, a_dim, hidden).to(self.device)
         self.critic_target.load_state_dict(self.critic.state_dict())
         
-        lr_actor = cfg.get("LR_ACTOR", cfg["LR"])
-        lr_critic = cfg.get("LR_CRITIC", cfg["LR"])
+        lr_actor = self.base_lr_actor
+        lr_critic = self.base_lr_critic
         self.actor_opt = optim.Adam(self.actor.parameters(), lr=lr_actor)
         self.critic_opt = optim.Adam(self.critic.parameters(), lr=lr_critic)
         
@@ -191,7 +199,7 @@ class PIDGainSACAgent:
     def update_std_scale(self, episode_num):
         """
         🆕 표준편차 Annealing 업데이트
-        에피소드 진행에 따라 탐험 강도 감소
+        에피소드 진행에 따라 탐험 강도 감소 (1.0 -> 0.5)
         """
         self.current_episode = episode_num
         
@@ -264,7 +272,7 @@ class PIDGainSACAgent:
         """
         수정: 세그먼트별 transition 저장
         Args:
-            state: 현재 상태 (STATE_DIM 차원) [0-(STATE_BASE_DIM-1): 기존, STATE_BASE_DIM-(STATE_DIM-1): 궤적 요약]
+            state: 현재 상태 (STATE_DIM 차원 = 6)
             action: PID gain 액션 [Kp, Ki, Kd]
             reward: 세그먼트 보상
             next_state: 다음 상태 (STATE_DIM 차원)
@@ -281,9 +289,11 @@ class PIDGainSACAgent:
             print(f"❌ [오류] 리플레이 버퍼 저장 실패 - NaN/Inf 검출!")
             return
         
-        if reward < -100.0 or reward > 50.0:
+        reward_min = Constants.REWARD_MIN
+        reward_max = Constants.REWARD_MAX
+        if reward < reward_min or reward > reward_max:
             print(f"⚠️ [경고] 비정상 보상 클리핑: {reward:.2f} → ", end="")
-            reward = np.clip(reward, -100.0, 50.0)
+            reward = np.clip(reward, reward_min, reward_max)
             print(f"{reward:.2f}")
         
         norm_action = self._normalize_pid_action(action)
@@ -296,7 +306,9 @@ class PIDGainSACAgent:
 
     def _normalize_pid_action(self, pid_action):
         """PID gain을 [-1, 1] 범위로 정규화"""
-        def normalize_single(v, lo, hi):
+        pid_range = self.cfg["PID_RANGE"]
+
+        def normalize_linear(v, lo, hi):
             if abs(hi - lo) < 1e-9:
                 return 0.0
             v = np.clip(v, lo, hi)
@@ -306,11 +318,27 @@ class PIDGainSACAgent:
                 return 0.0
             return normalized
 
+        def normalize_kd(v, lo, hi):
+            lo_safe = 1e-8 if lo <= 0.0 else lo
+            hi_safe = max(hi, lo_safe * 10.0)
+            v_clipped = np.clip(v, lo, hi)
+            if v_clipped <= 0.0:
+                return -1.0
+            log_span = np.log10(hi_safe) - np.log10(lo_safe)
+            if abs(log_span) < 1e-9:
+                return 0.0
+            v_log = np.log10(max(v_clipped, lo_safe))
+            normalized = 2.0 * (v_log - np.log10(lo_safe)) / log_span - 1.0
+            if np.isnan(normalized) or np.isinf(normalized):
+                print(f"❌ [오류] 정규화 결과 비정상 (Kd): v={v}, lo={lo}, hi={hi}")
+                return 0.0
+            return float(np.clip(normalized, -1.0, 1.0))
+
         return np.array(
             [
-                normalize_single(pid_action[0], *self.cfg["PID_RANGE"]["Kp"]),
-                normalize_single(pid_action[1], *self.cfg["PID_RANGE"]["Ki"]),
-                normalize_single(pid_action[2], *self.cfg["PID_RANGE"]["Kd"]),
+                normalize_linear(pid_action[0], *pid_range["Kp"]),
+                normalize_linear(pid_action[1], *pid_range["Ki"]),
+                normalize_kd(pid_action[2], *pid_range["Kd"]),
             ],
             dtype=np.float32,
         )
@@ -335,10 +363,17 @@ class PIDGainSACAgent:
                 print(f"⚠️ [경고] 배치 데이터에 NaN/Inf 발견 - 업데이트 건너뜀")
                 continue
             
-            r = torch.clamp(r, -100.0, 50.0)
+            r = torch.clamp(r, Constants.REWARD_MIN, Constants.REWARD_MAX)
 
             with torch.no_grad():
-                y = r
+                next_action, next_logp = self.actor.sample(
+                    ns, std_scale=self.std_scale
+                )
+                q1_targ, q2_targ = self.critic_target(ns, next_action)
+                min_q_targ = torch.min(q1_targ, q2_targ)
+                target = r + (1.0 - d) * self.gamma * (
+                    min_q_targ - self.alpha * next_logp
+                )
 
             q1, q2 = self.critic(s, a)
             
@@ -346,7 +381,7 @@ class PIDGainSACAgent:
                 print(f"⚠️ [경고] Q 값에 NaN/Inf 발견 - Critic 업데이트 건너뜀")
                 continue
             
-            q_loss = F.mse_loss(q1, y) + F.mse_loss(q2, y)
+            q_loss = F.mse_loss(q1, target) + F.mse_loss(q2, target)
             
             if torch.isnan(q_loss) or torch.isinf(q_loss):
                 print(f"⚠️ [경고] Critic loss가 비정상입니다: {q_loss.item()}")
@@ -392,8 +427,8 @@ class PIDGainSACAgent:
 
     def warm_start_buffer(self, num_samples=None):
         """
-        🆕 라틴 하이퍼큐브 샘플링으로 버퍼 초기화
-        새 PID 범위에서 골고루 샘플링하여 버퍼 품질 확보
+        라틴 하이퍼큐브 샘플링으로 버퍼 초기화
+        초기 리플레이 버퍼를 균일하게 채우기 위한 방법
         """
         if num_samples is None:
             num_samples = Constants.WARM_START_NUM_SAMPLES
@@ -409,26 +444,39 @@ class PIDGainSACAgent:
         
         pid_range = self.cfg["PID_RANGE"]
         
+        kd_lo, kd_hi = pid_range["Kd"]
+        kd_lo_safe = 1e-8 if kd_lo <= 0.0 else kd_lo
+        kd_hi_safe = max(kd_hi, kd_lo_safe * 10.0)
+
+        linear_kd = (kd_lo <= 0.0) or (kd_hi <= 0.02)
+
         if use_lhs:
             # LHS 샘플링
             sampler = qmc.LatinHypercube(d=3)
             samples = sampler.random(n=num_samples)
             
-            # Kp, Ki: 선형, Kd: 로그
+            # Kp, Ki: 선형
             kp_samples = samples[:, 0] * (pid_range["Kp"][1] - pid_range["Kp"][0]) + pid_range["Kp"][0]
             ki_samples = samples[:, 1] * (pid_range["Ki"][1] - pid_range["Ki"][0]) + pid_range["Ki"][0]
-            kd_log_samples = samples[:, 2] * (np.log10(pid_range["Kd"][1]) - np.log10(pid_range["Kd"][0])) + np.log10(pid_range["Kd"][0])
-            kd_samples = 10 ** kd_log_samples
+            # Kd: 작은 범위/0 포함 시 선형, 그 외 로그
+            if linear_kd:
+                kd_samples = samples[:, 2] * (kd_hi - max(kd_lo, 0.0))
+            else:
+                kd_log_samples = samples[:, 2] * (np.log10(kd_hi_safe) - np.log10(kd_lo_safe)) + np.log10(kd_lo_safe)
+                kd_samples = 10 ** kd_log_samples
         else:
             # 랜덤 샘플링 (scipy 없을 때)
             kp_samples = np.random.uniform(pid_range["Kp"][0], pid_range["Kp"][1], num_samples)
             ki_samples = np.random.uniform(pid_range["Ki"][0], pid_range["Ki"][1], num_samples)
-            kd_log_samples = np.random.uniform(
-                np.log10(pid_range["Kd"][0]), 
-                np.log10(pid_range["Kd"][1]), 
-                num_samples
-            )
-            kd_samples = 10 ** kd_log_samples
+            if linear_kd:
+                kd_samples = np.random.uniform(max(kd_lo, 0.0), kd_hi, num_samples)
+            else:
+                kd_log_samples = np.random.uniform(
+                    np.log10(kd_lo_safe), 
+                    np.log10(kd_hi_safe), 
+                    num_samples
+                )
+                kd_samples = 10 ** kd_log_samples
         
         # 각 샘플에 대해 더미 transition 저장
         for kp, ki, kd in zip(kp_samples, ki_samples, kd_samples):
@@ -439,10 +487,14 @@ class PIDGainSACAgent:
             # PID를 액션으로 변환 (scale_action_to_pid의 역함수)
             kp_norm = 2.0 * (kp - pid_range["Kp"][0]) / (pid_range["Kp"][1] - pid_range["Kp"][0]) - 1.0
             ki_norm = 2.0 * (ki - pid_range["Ki"][0]) / (pid_range["Ki"][1] - pid_range["Ki"][0]) - 1.0
-            kd_log = np.log10(max(kd, 1e-12))
-            kd_log_min = np.log10(pid_range["Kd"][0])
-            kd_log_max = np.log10(pid_range["Kd"][1])
-            kd_norm = 2.0 * (kd_log - kd_log_min) / (kd_log_max - kd_log_min) - 1.0
+            linear_kd = (kd_lo <= 0.0) or (pid_range["Kd"][1] <= 0.02)
+            if linear_kd:
+                kd_norm = 2.0 * (kd - max(pid_range["Kd"][0], 0.0)) / (pid_range["Kd"][1] - max(pid_range["Kd"][0], 0.0) + 1e-8) - 1.0
+            else:
+                kd_log = np.log10(max(kd, kd_lo_safe))
+                kd_log_min = np.log10(kd_lo_safe)
+                kd_log_max = np.log10(kd_hi_safe)
+                kd_norm = 2.0 * (kd_log - kd_log_min) / (kd_log_max - kd_log_min) - 1.0
             
             dummy_action = np.array([kp_norm, ki_norm, kd_norm], dtype=np.float32)
             dummy_reward = 0.0
@@ -495,6 +547,27 @@ class PIDGainSACAgent:
         }
         
         return metrics
+
+    def update_lr_schedule(self, episode_num):
+        """
+        100 에피소드 이후 학습률을 절반으로 낮춰 후반 수렴을 안정화
+        """
+        if self.lr_scaled:
+            return
+        if episode_num >= 100:
+            for param_group in self.actor_opt.param_groups:
+                param_group["lr"] = self.base_lr_actor * 0.5
+            for param_group in self.critic_opt.param_groups:
+                param_group["lr"] = self.base_lr_critic * 0.5
+            if self.auto_entropy_tuning:
+                for param_group in self.alpha_opt.param_groups:
+                    param_group["lr"] = self.cfg["LR"] * 0.5
+            self.lr_scaled = True
+            print(
+                f"🧠 [LR 스케줄] 에피소드 {episode_num} 이후 "
+                f"Actor LR={self.base_lr_actor*0.5:.2e}, "
+                f"Critic LR={self.base_lr_critic*0.5:.2e}"
+            )
 
     def save_model(self, path):
         torch.save(

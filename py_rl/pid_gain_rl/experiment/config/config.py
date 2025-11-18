@@ -12,7 +12,7 @@ from .constants import Constants
 class Config:
     """강화학습 설정을 관리하는 데이터클래스"""
     # 신경망 설정
-    state_dim: int = Constants.STATE_DIM  # 20차원 상태 공간 (기본 12 + 궤적 요약 8)
+    state_dim: int = Constants.STATE_DIM  # 6차원 상태 공간 (힘/오차/PI 출력)
     action_dim: int = 3
     hidden_dim: int = Constants.DEFAULT_HIDDEN_DIM
     lr: float = Constants.DEFAULT_LR

@@ -11,8 +11,7 @@ def scale_action_to_pid(action, pid_range):
     """
     액션을 PID 게인으로 스케일링 (벡터화)
     - 내부 액션 a ∈ [-1, 1]^3 → 실제 PID
-    - Kp, Ki: 선형 매핑(소수점 2자리 반올림)
-    - Kd: 로그 스케일 매핑(소수점 6자리)로 극소 범위 해상도 확보 (예: [1e-6, 1e-3])
+    - Kp, Ki, Kd: 각각 0.01 단위로 양자화하여 소수점 둘째 자리까지 사용
     """
     a = np.clip(np.asarray(action, dtype=np.float32), -1.0, 1.0)
     # 선형 매핑: Kp, Ki
@@ -20,101 +19,85 @@ def scale_action_to_pid(action, pid_range):
     ki_lo, ki_hi = pid_range["Ki"]
     kp = kp_lo + (a[0] + 1.0) * 0.5 * (kp_hi - kp_lo)
     ki = ki_lo + (a[1] + 1.0) * 0.5 * (ki_hi - ki_lo)
-    # 로그 매핑: Kd
+    # Kd 매핑: 작은 범위(≤0.02)나 하한이 0이면 선형 매핑으로 안정화, 그 외 로그 매핑
     kd_lo, kd_hi = pid_range["Kd"]
-    kd_lo_safe = max(kd_lo, 1e-12)
-    kd_hi_safe = max(kd_hi, kd_lo_safe * 10.0)
-    loL, hiL = np.log10(kd_lo_safe), np.log10(kd_hi_safe)
-    kdL = loL + (a[2] + 1.0) * 0.5 * (hiL - loL)
-    kd = float(10 ** kdL)
-    pid_gains = np.array([kp, ki, kd], dtype=np.float32)
-    
-    # P, I: 소수점 2자리 반올림
-    pid_gains[0] = round(pid_gains[0], 2)  # Kp
-    pid_gains[1] = round(pid_gains[1], 2)  # Ki
-    pid_gains[2] = round(pid_gains[2], 6)  # Kd - 로그 스케일 해상도 유지
+    pid_gains = np.array([kp, ki, 0.0], dtype=np.float32)
+
+    use_linear_kd = (kd_lo <= 0.0) or (kd_hi <= 0.02)
+    if use_linear_kd:
+        kd = (a[2] + 1.0) * 0.5 * (kd_hi - max(kd_lo, 0.0))
+    else:
+        kd_lo_safe = 1e-6 if kd_lo <= 0.0 else kd_lo
+        kd_hi_safe = max(kd_hi, kd_lo_safe * 10.0)
+        loL, hiL = np.log10(kd_lo_safe), np.log10(kd_hi_safe)
+        kdL = loL + (a[2] + 1.0) * 0.5 * (hiL - loL)
+        kd = float(10 ** kdL)
+    pid_gains[2] = kd
+
+    def quantize(value, lo, hi, step=0.01):
+        value = np.clip(value, lo, hi)
+        quantized = np.round(value / step) * step
+        quantized = np.clip(quantized, lo, hi)
+        return float(np.round(quantized, 2))
+
+    pid_gains[0] = quantize(pid_gains[0], kp_lo, kp_hi)
+    pid_gains[1] = quantize(pid_gains[1], ki_lo, ki_hi)
+    kd_step = 0.001 if kd_hi <= 0.02 else 0.01
+    pid_gains[2] = quantize(pid_gains[2], max(kd_lo, 0.0), kd_hi, step=kd_step)
     
     return pid_gains
 
 
 def create_initial_state(
-    force_data, 
-    target_force, 
-    prev_pid_gains=None, 
-    episode_history=None, 
-    dt_sec=0.001
+    force_data,
+    target_force,
+    prev_pid_gains=None,
+    episode_history=None,
+    dt_sec=0.001,
 ):
     """
-    초기 상태 벡터 생성 (STATE_DIM 차원)
-    
-    기본 STATE_BASE_DIM 차원 (로봇PC 6 + 강화학습PC 6) + 궤적 요약 STATE_TRAJECTORY_DIM 차원
-    
+    초기 상태 벡터 생성 (STATE_DIM 차원 = 6)
+
     Args:
-        force_data: 힘 데이터 리스트
+        force_data: 힘 데이터 리스트(선택사항)
         target_force: 목표 힘
-        prev_pid_gains: 이전 PID 게인 [Kp, Ki, Kd]
-        episode_history: 에피소드 히스토리 (미사용)
-        dt_sec: 샘플링 시간 (미사용)
-    
+        prev_pid_gains: 미사용 (호환성 유지용)
+        episode_history: 미사용 (호환성 유지용)
+        dt_sec: 미사용 (호환성 유지용)
+
     Returns:
-        state: STATE_DIM 차원 numpy array
+        state: [현재힘, 목표힘, 힘 오차, 오차 미분, 오차 적분, PI 출력]
     """
     import numpy as np
-    
-    # 1. 기본 STATE_BASE_DIM 차원
-    if not force_data:
-        force_data = [target_force]
-    
-    force_arr = np.array(force_data, dtype=np.float64)
-    
-    # 기본 6차원 (로봇PC 전송 예정)
-    base_state = [
-        prev_pid_gains[0] if prev_pid_gains is not None else 40.0,  # Kp
-        prev_pid_gains[1] if prev_pid_gains is not None else 50.0,  # Ki
-        prev_pid_gains[2] if prev_pid_gains is not None else 0.0,   # Kd
-        0.0,  # prev_reward (초기값)
-        target_force,
-        10.0,  # episode_seconds (기본값)
-    ]
-    
-    # 강화학습PC 계산 6차원
-    if len(force_arr) >= 10:
-        errors = force_arr - target_force
-        base_stats = [
-            float(np.mean(force_arr)),
-            float(np.std(force_arr)),
-            float(np.min(force_arr)),
-            float(np.max(force_arr)),
-            float(np.mean(errors)),
-            float(np.std(errors)),
-        ]
+
+    if force_data:
+        current_force = float(force_data[-1])
     else:
-        base_stats = [target_force, 0.0, target_force, target_force, 0.0, 0.0]
-    
-    base_state.extend(base_stats)  # STATE_BASE_DIM 차원 완성
-    
-    # 2. 🆕 궤적 요약 8차원 (초기값은 모두 0)
-    # 에피소드 시작 시점이므로 궤적 정보 없음
-    trajectory_features = [
-        0.0,  # overshoot
-        0.0,  # settling_time
-        0.0,  # rmse
-        0.0,  # band_ratio
-        0.0,  # oscillation_freq
-        0.0,  # oscillation_amp
-        0.0,  # rise_time
-        0.0,  # steady_state_error
-    ]
-    
-    state = np.array(base_state + trajectory_features, dtype=np.float32)
-    
-    # NaN/Inf 가드
+        current_force = float(Constants.INITIAL_CONTACT_FORCE)
+
+    target_force_value = float(target_force)
+    error = current_force - target_force_value
+    error_dot = 0.0
+    error_int = 0.0
+    pi_output = float(Constants.INITIAL_PI_OUTPUT)
+
+    state = np.array(
+        [
+            current_force,
+            target_force_value,
+            error,
+            error_dot,
+            error_int,
+            pi_output,
+        ],
+        dtype=np.float32,
+    )
+
     if np.isnan(state).any() or np.isinf(state).any():
         state = np.nan_to_num(state, nan=0.0, posinf=0.0, neginf=0.0)
-    
-    return state  # STATE_DIM 차원 반환
+
+    return state
 
 # 주의: _estimate_state_from_previous_pid() 함수는 삭제되었습니다.
 # 이 함수는 experiment 폴더의 레거시 코드에서만 사용되며,
 # 현재 모듈화된 코드에서는 create_initial_state()를 사용합니다.
-

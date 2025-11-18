@@ -32,26 +32,26 @@
 - `pid_range`: PID 범위 딕셔너리
 
 **로직**:
-1. **Kp, Ki**: 선형 매핑
+1. **Kp, Ki**: 선형 매핑 후 0.01 단위 양자화
    ```python
    kp = kp_lo + (a[0] + 1.0) * 0.5 * (kp_hi - kp_lo)
    ki = ki_lo + (a[1] + 1.0) * 0.5 * (ki_hi - ki_lo)
    ```
-   - 소수점 2자리 반올림
+   - `round(value / 0.01) * 0.01`으로 소수 둘째 자리까지 유지
 
-2. **Kd**: 로그 스케일 매핑
+2. **Kd**: 로그 스케일 매핑 후 0.01 단위 양자화
    ```python
    kd_log = loL + (a[2] + 1.0) * 0.5 * (hiL - loL)
    kd = 10 ** kd_log
    ```
-   - 극소 범위 해상도 확보 (예: [1e-4, 5e-2])
-   - 소수점 6자리 유지
+   - 최소값 0.01, 최대값 0.1 범위 유지
+   - `round(kd / 0.01) * 0.01`으로 소수 둘째 자리까지 유지
 
 **반환값**: `np.array([kp, ki, kd], dtype=np.float32)`
 
 #### 1.2 `create_initial_state(force_data, target_force, prev_pid_gains=None, episode_history=None, dt_sec=0.001)`
 
-**역할**: 초기 상태 벡터 생성 (20차원)
+**역할**: 초기 상태 벡터 생성 (6차원)
 
 **매개변수**:
 - `force_data`: 힘 데이터 리스트
@@ -61,25 +61,16 @@
 - `dt_sec`: 샘플링 시간 (미사용)
 
 **로직**:
+- 현재 힘 (`force_data`가 없으면 `Constants.INITIAL_CONTACT_FORCE` = -45.0N 사용)
+- 목표 힘 (기본: -60.0N)
+- 힘 오차 (현재 힘 − 목표 힘)
+- 오차 미분 (초기 0.0)
+- 오차 적분 (초기 0.0)
+- PI 출력 (없으면 `Constants.INITIAL_PI_OUTPUT` = 0.05MPa 사용)
 
-1. **기존 12차원**:
-   - 로봇PC 6차원:
-     - Kp, Ki, Kd (이전 PID 또는 기본값)
-     - prev_reward (0.0)
-     - target_force
-     - episode_seconds (10.0)
-   - 강화학습PC 6차원:
-     - force 평균, std, min, max
-     - error 평균, std
+**NaN/Inf 가드**: NaN/Inf 발생 시 0으로 치환
 
-2. **궤적 요약 8차원** (초기값은 모두 0):
-   - overshoot, settling_time, rmse, band_ratio
-   - oscillation_freq, oscillation_amp
-   - rise_time, steady_state_error
-
-**NaN/Inf 가드**: 모든 값이 NaN/Inf가 아니도록 보장
-
-**반환값**: `np.array` (20차원, dtype=np.float32)
+**반환값**: `np.array` (6차원, dtype=np.float32)
 
 ---
 
@@ -222,8 +213,8 @@
    - **Input RMS**: `_calculate_input_rms()` (PID gain 합의 RMS)
    - **Total Variation**: `_calculate_total_variation()` (제어 출력 변화 총량)
 
-3. **안정성 지표 (2개)**:
-   - **Band Ratio**: `_calculate_success_rate()` (목표 범위 내 유지 비율, ±2% 오차)
+3. **안정성 지표 (2개 + Success Rate 별도 노출)**:
+   - **Band Ratio** / **Success Rate**: `_calculate_success_rate()` (목표 범위 내 유지 비율, ±2% 오차, `success_rate` 컬럼으로 별도 저장/그래프화)
    - **Error Variance**: `_calculate_error_variance()` (오차 분산)
 
 #### 5.4 지표 계산 상세
@@ -270,7 +261,7 @@
 1. **`save_episode_metrics(episode_num)`**
    - 에피소드별 지표를 CSV로 저장
    - 개별 지표별 CSV 파일 생성
-   - 예: `rmse.csv`, `overshoot.csv`, `settling_time.csv` 등
+   - 예: `rmse.csv`, `success_rate.csv`, `overshoot.csv`, `settling_time.csv` 등
 
 2. **`save_performance_summary()`**
    - 전체 성능 요약 저장 (논문용 10개 핵심 지표)
@@ -281,7 +272,7 @@
 
 1. **`generate_plots()`**
    - 모든 지표 그래프 생성
-   - 개별 지표 그래프 (PNG)
+   - 개별 지표 그래프 (PNG, `success_rate` 포함)
    - 종합 대시보드 (`comprehensive_dashboard.png`)
    - 스텝 기반 그래프 (`step_dashboard.png`)
 
@@ -368,9 +359,9 @@
 
 #### 6.4 데이터 저장
 
-1. **`save_episode_rewards(episode_rewards)`**
-   - 에피소드별 보상 CSV 저장
-   - `episode_rewards.csv` 생성
+1. **`save_episode_rewards(episode_rewards, ma_window=50)`**
+   - 에피소드별 보상 + 이동평균(기본 50 ep) CSV 저장
+   - `episode_rewards.csv` 생성 (`episode`, `reward`, `reward_ma_50`)
 
 2. **`save_reward_breakdown_csv()`**
    - 스텝별 보상 분석 CSV 저장
@@ -382,10 +373,9 @@
 
 #### 6.5 시각화
 
-1. **`generate_episode_reward_graph(episode_rewards)`**
-   - 에피소드별 보상 그래프 생성
-   - `episode_rewards.png` 생성
-   - 평균 보상 선 표시
+1. **`generate_episode_reward_graph(episode_rewards, ma_window=50)`**
+   - 에피소드별 보상 그래프 생성 (이동평균 + 평균선 포함)
+   - `episode_rewards.png` 생성 (`Episode Reward`, `Moving Avg`, `Mean`)
 
 2. **`generate_reward_components_graph()`**
    - 보상 구성 요소 시각화 그래프 생성
@@ -411,8 +401,8 @@
    - `force=True`: PNG 생성, `force=False`: CSV만 저장
    - 메모리 절약을 위해 `force=False`일 때는 CSV만 저장
 
-2. **`_moving_average(data, window=10)`**
-   - Moving average 계산
+2. **`_compute_moving_average(values, window)`**
+   - 이동평균 계산 (Reward 그래프용)
 
 3. **`_write_csv_append()`**
    - CSV 파일에 추가 쓰기 (미사용)
@@ -445,7 +435,7 @@
 ## 📋 요약
 
 ### 유틸리티 모듈
-- **`math_utils.py`**: PID 액션 스케일링 (선형/로그), 초기 상태 생성 (20차원)
+- **`math_utils.py`**: PID 액션 스케일링 (선형/로그, 0.1 양자화), 초기 상태 생성 (6차원)
 - **`data_saver.py`**: 모든 데이터 저장 통합 관리
 - **`signals.py`**: 안전한 종료 처리 (SIGINT, SIGTERM)
 
@@ -465,4 +455,3 @@
 ---
 
 **완료**: 모든 모듈 기능 분석 완료! (총 16개 모듈)
-

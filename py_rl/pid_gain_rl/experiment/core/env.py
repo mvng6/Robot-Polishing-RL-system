@@ -23,7 +23,7 @@ class PIDGainEnvironment:
     """
     PID Gain 최적화 환경
     - 🆕 세그먼트 분할 학습 (1 에피소드 = 5 transition)
-    - 🆕 STATE_DIM 차원 상태 공간 (STATE_BASE_DIM + STATE_TRAJECTORY_DIM)
+    - 🆕 STATE_DIM 차원 상태 공간 (현재 힘 기반 6차원)
     """
 
     def __init__(self, cfg=None):
@@ -34,10 +34,10 @@ class PIDGainEnvironment:
         cfg["STATE_DIM"] = Constants.STATE_DIM
         
         print(f"✅ [Env] STATE_DIM 설정: {cfg['STATE_DIM']}차원 "
-              f"(기본 {Constants.STATE_BASE_DIM} + 궤적 {Constants.STATE_TRAJECTORY_DIM})")
+              f"(현재 힘, 목표 힘, 오차, 오차 미분/적분, PI 출력)")
         print(f"✅ [Env] 세그먼트 분할: {Constants.NUM_SEGMENTS}개 "
               f"({Constants.SEGMENT_LENGTH_S}초씩)")
-        print(f"✅ [Env] Fine-tuning: alpha={Constants.ACTOR_INITIAL_ALPHA}, "
+        print(f"✅ [Env] Exploration settings: alpha={Constants.ACTOR_INITIAL_ALPHA}, "
               f"log_std_max={Constants.ACTOR_LOG_STD_MAX}")
         
         self.cfg = cfg
@@ -64,6 +64,8 @@ class PIDGainEnvironment:
         # ==== 로깅 폴더 구조: learning_done_{timestamp}/ 한 곳에 모두 ====
         # 1. LearningDoneLogger가 learning_done 폴더 생성
         self.ldlogger = LearningDoneLogger(self.cfg["LOG_DIR"])
+        self.control_log_dir = os.path.join(self.ldlogger.log_dir, "control_log")
+        os.makedirs(self.control_log_dir, exist_ok=True)
 
         # 2. 나머지 Logger들은 learning_done 폴더 안에 서브폴더 생성
         self.cplogger = ControlPerformanceLogger(self.ldlogger.log_dir)
@@ -72,6 +74,7 @@ class PIDGainEnvironment:
         # ==== ADDED: PID gain 최적화용 변수들 ====
         self.episode_force_data = []  # 에피소드 동안 힘 데이터 수집
         self.episode_pi_output_data = []  # 에피소드 동안 PI 출력 데이터 수집
+        self.episode_state_history = []  # 에피소드 동안 전체 상태 기록
         self.episode_start_time = None
         self.current_pid_gains = None  # 현재 사용 중인 PID gain
 
@@ -95,281 +98,108 @@ class PIDGainEnvironment:
         self, force_data, pi_output_data, target_force=None, episode_len_s=None
     ):
         """
-        연속형 지수 스코어 + PBRS + 기준선 중심화 + tanh 소프트클립
-        최종 범위: [-1.0, 1.0], 개선/악화 신호 강화
-        
-        주요 특징:
-        1. 단위 일관성: overshoot % 단위로만 사용
-        2. 안전 위반: 하드 패널티 (-1.0)
-        3. EWMA 기준선: 지속적 개선 신호 제공 (보상 중심화)
-        4. tanh 소프트클립: 그라디언트 소멸 방지
-        5. 범위: [-1, 1] (SAC 학습에 최적화)
-        
-        Args:
-            force_data: 에피소드 힘 데이터
-            pi_output_data: PI 출력 데이터
-            target_force: 목표 힘 (기본값: cfg)
-            episode_len_s: 에피소드 길이 (기본값: cfg)
-        
-        Returns:
-            reward: [-1.0, 1.0] 범위 보상
-            metrics: 성능 지표 딕셔너리
+        힘 오차 기반 단순 보상 함수.
+        평균 힘 오차(%)가 작을수록 보상이 크며, 보상 범위는 [-1, 1]을 유지한다.
         """
         import numpy as np
 
-        # ========== 1. 입력 검증 및 기본값 ==========
-        if not force_data:
-            return 0.0, {}
-        
         if target_force is None:
             target_force = self.cfg["TARGET_FORCE"]
         if episode_len_s is None:
             episode_len_s = self.cfg["EPISODE_SECONDS"]
 
+        if not force_data:
+            metrics = {
+                "mean_error": 0.0,
+                "mean_error_pct": 0.0,
+                "rmse": 0.0,
+                "rmse_pct": 0.0,
+                "overshoot": 0.0,
+                "settling_time": episode_len_s,
+                "band_ratio": 0.0,
+                "band_time": 0.0,
+                "out_of_band_time": episode_len_s,
+                "pi_rms": 0.0,
+                "reward": 0.0,
+                "reward_score": 0.0,
+                "r_centered": 0.0,
+                "r_baseline": 0.0,
+                "progress": 0.0,
+                "I_improve": 0.0,
+            }
+            return 0.0, metrics
+
         force_array = np.array(force_data, dtype=np.float64)
         n_samples = len(force_array)
+        target = float(target_force)
+        target_abs = max(abs(target), 1.0)
+
+        errors = force_array - target
+        abs_errors = np.abs(errors)
+
+        mean_error = float(np.mean(abs_errors))
+        rmse = float(np.sqrt(np.mean(errors ** 2)))
+
+        mean_error_pct = float(mean_error / target_abs * 100.0)
+        rmse_pct = float(rmse / target_abs * 100.0)
+
+        ref_pct = max(Constants.REWARD_ERROR_REF_PERCENT, 1e-6)
+        reward = float(np.clip(1.0 - 2.0 * (mean_error_pct / ref_pct), -1.0, 1.0))
+
         fs_hz = n_samples / max(episode_len_s, 1e-6)
-        dt = 1.0 / max(fs_hz, 1e-6)
-        errors = force_array - target_force
-        T_abs = max(abs(target_force), 1.0)
+        band_tol = Constants.BAND_TOLERANCE_N
+        in_band = abs_errors <= band_tol
+        band_ratio = float(np.mean(in_band)) if n_samples > 0 else 0.0
+        band_time = band_ratio * episode_len_s
+        out_of_band_time = (1.0 - band_ratio) * episode_len_s
 
-        # ========== 2. 핵심 지표 계산 ==========
-        
-        # RMSE (전체 추종 오차)
-        rmse = float(np.sqrt(np.mean(errors**2)))
+        settling_time = episode_len_s
+        if n_samples > 0:
+            hold_samples = int(max(1, fs_hz * Constants.SETTLING_HOLD_TIME_S))
+            if hold_samples < n_samples:
+                for idx in range(n_samples - hold_samples):
+                    if np.all(in_band[idx : idx + hold_samples]):
+                        settling_time = idx / max(fs_hz, 1e-6)
+                        break
 
-        # 🆕 초기 구간 피크 패널티 (0~0.5초 구간 전용)
-        early_peak_penalty = self._calculate_early_peak_penalty(
-            force_array, target_force, episode_len_s, dt
-        )
-
-        # Overshoot (% 단위로 일관화)
-        if target_force < 0:
+        if target < 0:
             extreme_force = float(np.min(force_array))
-            overshoot_ratio = max(0.0, (target_force - extreme_force) / T_abs)
+            overshoot_pct = max(
+                0.0, (target - extreme_force) / target_abs * 100.0
+            )
         else:
             extreme_force = float(np.max(force_array))
-            overshoot_ratio = max(0.0, (extreme_force - target_force) / T_abs)
-        
-        overshoot_pct = float(overshoot_ratio * 100.0)  # % 단위로 변환
-
-        # 밴드 유지율 (±BAND_TOLERANCE_N)
-        tol_main = Constants.BAND_TOLERANCE_N
-        band_ratio = float(np.mean(np.abs(errors) <= tol_main)) if n_samples > 0 else 0.0
-
-        # 정착시간 (Settling Time) - warmup 후
-        SHAPING_WARMUP_S = Constants.SHAPING_WARMUP_S
-        start_idx = int(fs_hz * SHAPING_WARMUP_S)
-        tol_settling = max(Constants.SETTLING_BAND_TOLERANCE, 0.01 * T_abs)
-        hold_samples = int(fs_hz * Constants.SETTLING_HOLD_TIME_S)
-        in_settling = np.abs(errors) <= tol_settling
-        
-        settling_time_s = episode_len_s  # 기본값: 전체 시간
-        runlen = 0
-        for k in range(start_idx, n_samples):
-            if in_settling[k]:
-                runlen += 1
-                if runlen >= hold_samples:
-                    settling_time_s = max(0.0, (k - hold_samples) * dt)
-                    break
-            else:
-                runlen = 0
-
-        # 정상상태 오차 (ESS): 마지막 10% 구간
-        if n_samples > 0:
-            tail_len = max(1, int(n_samples * 0.1))
-            ess = float(np.mean(errors[-tail_len:]))
-        else:
-            ess = 0.0
-
-        # 제어 입력 품질 (u_rms 정규화)
-        u_rms_n = 0.0
-        if pi_output_data:
-            u = np.array(pi_output_data, dtype=np.float64)
-            u_max = Constants.PI_OUTPUT_MAX if Constants.PI_OUTPUT_MAX > 0 else 1.0
-            u_rms_n = float(np.sqrt(np.mean(u**2)) / u_max)
-
-        # ========== 3. PBRS (Potential-Based Reward Shaping) ==========
-        abs_e = np.abs(errors)
-        skip = min(start_idx, len(abs_e))
-        abs_e_eff = abs_e[skip:] if skip < len(abs_e) else abs_e
-        progress = 0.0
-        
-        if len(abs_e_eff) > 1:
-            phi = -abs_e_eff / T_abs                  # Potential 함수
-            gamma = Constants.POTENTIAL_GAMMA        # 0.99 권장
-            F = gamma * phi[1:] - phi[:-1]           # 개선분
-            progress = float(np.mean(np.clip(F, 0.0, None)))  # 양수만
-
-        # ========== 4. 추종 실패 패널티 (0~1) ==========
-        rmse_fail_ratio = max(0.0, (rmse - Constants.TRACKING_FAIL_RMSE_THRESHOLD) / 
-                          Constants.TRACKING_FAIL_RMSE_THRESHOLD)
-        rmse_fail_ratio = min(1.0, rmse_fail_ratio)
-        
-        band_fail_ratio = max(0.0, (Constants.TRACKING_FAIL_BAND_RATIO - band_ratio) / 
-                          Constants.TRACKING_FAIL_BAND_RATIO)
-        band_fail_ratio = min(1.0, band_fail_ratio)
-        
-        P_fail = max(rmse_fail_ratio, band_fail_ratio)
-
-        # ========== 5. 연속형 스코어 (0~1) ==========
-        tau_settle = max(Constants.SCORE_TAU_TS, 1e-6)
-        tau_mp = max(Constants.SCORE_TAU_MP_PERCENT, 1e-6)
-        tau_ess = max(Constants.SCORE_TAU_ESS_N, 1e-6)
-        tau_u = max(Constants.SCORE_TAU_U, 1e-6)
-
-        S_ts   = float(np.exp(-float(settling_time_s) / tau_settle))
-        S_mp   = float(np.exp(-float(overshoot_pct) / tau_mp))
-        S_ess  = float(np.exp(-abs(ess) / tau_ess))
-        S_band = float(band_ratio)
-        S_u    = float(np.exp(-float(u_rms_n) / tau_u))
-
-        # ========== 6. 🎯 기준선 대비 개선량 (EWMA) ==========
-        # 첫 호출 시 초기화
-        if not hasattr(self, "_baseline"):
-            self._baseline = {
-                "ts": settling_time_s,
-                "mp": overshoot_pct,
-                "ess_abs": abs(ess),
-                "initialized": False,
-            }
-        
-        # 개선량 계산 (첫 에피소드는 0, 이후부터 유효)
-        if self._baseline["initialized"]:
-            I_ts  = float(np.clip((self._baseline["ts"] - settling_time_s) / tau_settle, -1.0, 1.0))
-            I_mp  = float(np.clip((self._baseline["mp"] - overshoot_pct) / tau_mp, -1.0, 1.0))
-            I_ess = float(np.clip((self._baseline["ess_abs"] - abs(ess)) / tau_ess, -1.0, 1.0))
-            
-            # 가중 평균 (정착시간 40%, 오버슈트 30%, ESS 30%)
-            I_improve = 0.4 * I_ts + 0.3 * I_mp + 0.3 * I_ess
-        else:
-            I_improve = 0.0
-            self._baseline["initialized"] = True  # 다음 에피소드부터 활성화
-
-        # EWMA 업데이트 (α=0.1: 최근 10개 에피소드 가중평균)
-        alpha = 0.1
-        self._baseline["ts"] = (1.0 - alpha) * self._baseline["ts"] + alpha * settling_time_s
-        self._baseline["mp"] = (1.0 - alpha) * self._baseline["mp"] + alpha * overshoot_pct
-        self._baseline["ess_abs"] = (1.0 - alpha) * self._baseline["ess_abs"] + alpha * abs(ess)
-
-        # ========== 7. 통합 보상 스코어 (0~1) ==========
-        W_PBRS = Constants.SCORE_W_PBRS  # 0.10
-        W_IMPR = 0.10  # 개선량 가중치
-        
-        reward_score = (
-            Constants.SCORE_W_TS * S_ts +       # 0.30: 정착시간
-            Constants.SCORE_W_MP * S_mp +       # 0.35: 오버슈트 (업데이트됨)
-            Constants.SCORE_W_ESS * S_ess +     # 0.20: 정상상태 오차
-            Constants.SCORE_W_BAND * S_band +   # 0.15: 밴드 유지
-            Constants.SCORE_W_U * S_u -         # 0.05: 제어 노력
-            Constants.SCORE_W_FAIL * P_fail +   # -0.15: 추종 실패
-            W_PBRS * progress +                 # +0.10: 순간 개선 (PBRS)
-            W_IMPR * I_improve -                 # +0.10: 기준선 대비 개선
-            early_peak_penalty                   # 🆕 초기 구간 피크 패널티
-        )
-
-        # ========== 8. 🔥 중심화 + tanh 소프트클립 [-1,1] ==========
-        # Beta 값을 변수로 관리 (0.98~0.99 범위에서 조정 가능)
-        beta = 0.99  # 느리게 추적 (최근 100 에피소드 가중평균)
-        if not hasattr(self, "_rew_baseline"):
-            self._rew_baseline = 0.0  # 초기값 변경: 0.5 → 0.0 (보상 범위 [-1, 1] 기준)
-        
-        # 보상 기준선 업데이트 (EWMA)
-        self._rew_baseline = beta * self._rew_baseline + (1.0 - beta) * reward_score
-        
-        # 기준선 중심화
-        r_centered = reward_score - self._rew_baseline
-        
-        # tanh 소프트클립 (gain으로 민감도 조절)
-        gain = 2.0  # 민감도 조절 (1.5~3.0 튜닝 가능)
-        reward = float(np.tanh(gain * r_centered))
-
-        # ========== 9. 안전 위반 하드 패널티 ==========
-        if abs(extreme_force) > Constants.SAFETY_FORCE_LIMIT:
-            reward = Constants.SAFETY_FORCE_PENALTY  # -1.0
-            print(
-                f"⚠️ [안전 위반] 극한 힘: {extreme_force:.1f}N "
-                f"(한계: ±{Constants.SAFETY_FORCE_LIMIT}N)"
+            overshoot_pct = max(
+                0.0, (extreme_force - target) / target_abs * 100.0
             )
 
-        # ========== 10. 메트릭 반환 ==========
-        metrics = {
-            # 기본 지표 (CSV 저장 및 로그 출력용)
-            "rmse": rmse,
-            "overshoot": overshoot_pct,  # % 단위로 일관화
-            "settling_time": settling_time_s,
-            "band_time": band_ratio * episode_len_s,
-            "out_of_band_time": (1.0 - band_ratio) * episode_len_s,
-            
-            # 🔍 디버깅용 추가 정보
-            "reward_score": reward_score,      # [0,1] 스코어
-            "r_centered": r_centered,          # 중심화된 값
-            "r_baseline": self._rew_baseline,  # 보상 기준선
-            "progress": progress,              # PBRS 개선분
-            "I_improve": I_improve,            # 기준선 대비 개선량
-            "baseline_ts": self._baseline["ts"],
-            "baseline_mp": self._baseline["mp"],
-            "baseline_ess": self._baseline["ess_abs"],
-            "early_peak_penalty": early_peak_penalty,  # 🆕 초기 구간 피크 패널티
-        }
+        pi_rms = 0.0
+        if pi_output_data:
+            pi_arr = np.array(pi_output_data, dtype=np.float64)
+            if pi_arr.size > 0:
+                pi_rms = float(np.sqrt(np.mean(pi_arr ** 2)))
 
-        # ========== 11. NaN/Inf 안전 가드 ==========
-        if np.isnan(reward) or np.isinf(reward):
-            print(f"❌ [오류] NaN/Inf 보상 발견! → 0.0으로 대체")
-            print(f"   force 범위: [{np.min(force_array):.2f}, {np.max(force_array):.2f}]")
-            print(f"   reward_score: {reward_score:.4f}, r_centered: {r_centered:.4f}")
-            reward = 0.0
-        
-        for key, val in list(metrics.items()):
-            if np.isnan(val) or np.isinf(val):
-                print(f"❌ [오류] 메트릭 '{key}' NaN/Inf: {val} → 기본값 대체")
-                metrics[key] = 0.0 if key != "settling_time" else episode_len_s
+        metrics = {
+            "mean_error": mean_error,
+            "mean_error_pct": mean_error_pct,
+            "rmse": rmse,
+            "rmse_pct": rmse_pct,
+            "overshoot": overshoot_pct,
+            "settling_time": settling_time,
+            "band_ratio": band_ratio,
+            "band_time": band_time,
+            "out_of_band_time": out_of_band_time,
+            "pi_rms": pi_rms,
+            "reward": reward,
+            "reward_score": reward,
+            "r_centered": reward,
+            "r_baseline": 0.0,
+            "progress": 0.0,
+            "I_improve": 0.0,
+        }
 
         return reward, metrics
     
-    def _calculate_early_peak_penalty(self, force_array, target_force, episode_len_s, dt):
-        """
-        🆕 초기 구간 피크 패널티 계산
-        0~0.5초 구간에서 발생한 피크에 대한 패널티
-        
-        Args:
-            force_array: 힘 데이터 배열
-            target_force: 목표 힘
-            episode_len_s: 에피소드 길이 (초)
-            dt: 샘플링 시간 간격
-        
-        Returns:
-            penalty: 패널티 값 (상한 0.15~0.2)
-        """
-        import numpy as np
-        
-        time_window = Constants.EARLY_PEAK_TIME_WINDOW  # 0.5초
-        max_samples = int(time_window / dt)
-        
-        if len(force_array) < max_samples:
-            # 데이터가 부족하면 전체 사용
-            early_force = force_array
-        else:
-            early_force = force_array[:max_samples]
-        
-        if len(early_force) == 0:
-            return 0.0
-        
-        # 피크 힘 계산
-        if target_force < 0:
-            peak_force = float(np.min(early_force))
-        else:
-            peak_force = float(np.max(early_force))
-        
-        # 피크 패널티 계산
-        peak_detector = max(0.0, abs(peak_force - target_force) / abs(target_force))
-        penalty = min(
-            peak_detector * Constants.EARLY_PEAK_PENALTY_SCALE,
-            Constants.EARLY_PEAK_PENALTY_MAX
-        )
-        
-        return float(penalty)
-
     def generate_episode_reward_graph(self, save_to_rlogger_folder=True):
         if not hasattr(self, "agent") or not self.agent.episode_rewards:
             self._log("WARNING", "생성할 보상 데이터가 없습니다")
@@ -456,6 +286,7 @@ class PIDGainEnvironment:
         """에피소드 리셋 (PID gain 최적화용)"""
         self.episode_force_data = []
         self.episode_pi_output_data = []
+        self.episode_state_history = []
         self.episode_start_time = None
         self.current_pid_gains = None
         self.last_log_time = None
@@ -542,6 +373,9 @@ class PIDGainEnvironment:
             # 🆕 Target Entropy 동적 조정
             self.agent.update_target_entropy(ep)
             
+            # 🆕 학습률 스케줄: 100ep 이후 절반 감소
+            self.agent.update_lr_schedule(ep)
+            
             # 🆕 탐색 메트릭 로깅 (20 에피소드마다)
             if ep % 20 == 0 and ep > 0:
                 exploration_metrics = self.agent.log_exploration_metrics(ep)
@@ -549,7 +383,9 @@ class PIDGainEnvironment:
                     self._log("INFO", 
                         f"📊 탐색 메트릭 [Ep {ep}]: "
                         f"std_ratio={exploration_metrics['action_std_ratio_pct']:.1f}%, "
-                        f"Kd_coverage={exploration_metrics['kd_coverage_pct']:.1f}%"
+                        f"Kd_coverage={exploration_metrics['kd_coverage_pct']:.1f}%, "
+                        f"target_std_ratio~{exploration_metrics['target_std_ratio']:.1f}, "
+                        f"std_scale={self.agent.std_scale:.2f}"
                     )
             print(f"\n{'='*60}\n에피소드 {ep+1}/{episodes}")
             if ep > 0 and self.previous_pid_gains is not None:
@@ -596,7 +432,7 @@ class PIDGainEnvironment:
                 self.comm.send_pid_once(
                     pid_gains[0],
                     pid_gains[1],
-                    0.0,  # 하드웨어에는 항상 D=0.0 전송 (미분 작용 비활성화)
+                    pid_gains[2],
                     timing_accurate=True,
                     episode_done=False,
                     learning_done=False,
@@ -608,15 +444,11 @@ class PIDGainEnvironment:
             # 5. 새로운 PID gain으로 제어된 실제 상태 관측
             actual_state, _ = self.comm.get_latest_state()
             if actual_state is not None:
-                # 실제 관측된 상태로 업데이트
-                actual_initial_state = create_initial_state(
-                    [actual_state[0]], self.cfg["TARGET_FORCE"], dt_sec=self.cfg["RECV_INTERVAL_SEC"]
-                )
+                actual_initial_state = np.array(actual_state, dtype=np.float32)
                 self._log(
                     "INFO", f"📊 실제 상태 관측: Force={actual_state[0]:.2f}N"
                 )
             else:
-                # 관측 실패 시 추정 상태 사용
                 actual_initial_state = initial_state
                 print("⚠️  [경고] 실제 상태 관측 실패, 추정 상태 사용")
                 self._log("WARNING", "실제 상태 관측 실패, 추정 상태 사용")
@@ -624,6 +456,7 @@ class PIDGainEnvironment:
             # 6. 에피소드 시간 동안 1kHz 데이터 수집
             self.episode_force_data = []
             self.episode_pi_output_data = []
+            self.episode_state_history = []
             self.current_pid_gains = pid_gains.copy()
 
             # sander_active 상승 에지 대기 (False -> True 전환 감지)
@@ -661,6 +494,10 @@ class PIDGainEnvironment:
                                 float(abs(state[0])),
                                 float(abs(self.cfg["TARGET_FORCE"])),
                             )
+                            monitor.post_pi_output(
+                                t_global,
+                                float(state[5]),
+                            )
                             last_monitor_sent = now
 
                     # 상승 에지 (False -> True) 포착
@@ -680,13 +517,6 @@ class PIDGainEnvironment:
 
                     # 타임아웃 (30초)
                     if time.perf_counter() - wait_start > 30.0:
-                        print(
-                            "⚠️ sander_active 대기 타임아웃 (30초) - 에피소드 강제 시작"
-                        )
-                        self._log(
-                            "WARNING",
-                            "sander_active 대기 타임아웃 - 에피소드 강제 시작",
-                        )
                         break
 
             # sander_active 상승 에지부터 동적 길이 데이터 수집
@@ -714,6 +544,7 @@ class PIDGainEnvironment:
                     time.sleep(0.001)
                     continue
 
+                self.episode_state_history.append(np.array(state, dtype=np.float32))
                 self.episode_force_data.append(state[0])  # 힘 데이터 수집
                 self.episode_pi_output_data.append(
                     state[5]
@@ -739,7 +570,7 @@ class PIDGainEnvironment:
                     self.comm.send_pid_once(
                         next_pid_for_reset[0],  # ✅ 다음 에피소드 PID 전송
                         next_pid_for_reset[1],
-                        0.0,  # 하드웨어에는 항상 D=0.0 전송
+                        next_pid_for_reset[2],
                         timing_accurate=True,  # ✅ 정상 종료와 동일한 플래그로 전송
                         episode_done=True,  # 에피소드 종료 신호
                         learning_done=False,
@@ -779,6 +610,10 @@ class PIDGainEnvironment:
                                     t_global,
                                     float(abs(state[0])),
                                     float(abs(self.cfg["TARGET_FORCE"])),
+                                )
+                                monitor.post_pi_output(
+                                    t_global,
+                                    float(state[5]),
                                 )
                                 last_monitor_sent = now
                         time.sleep(0.01)  # CPU 부하 방지
@@ -848,6 +683,10 @@ class PIDGainEnvironment:
                         float(abs(state[0])),  # current_force
                         float(abs(self.cfg["TARGET_FORCE"])),  # desired_force
                     )
+                    monitor.post_pi_output(
+                        t_global,
+                        float(state[5]),
+                    )
                     last_monitor_sent = now
 
             print(
@@ -870,18 +709,10 @@ class PIDGainEnvironment:
                 # 안전 위반 보상으로 transition 저장 (STATE_DIM 차원 상태)
                 bad_reward = episode_stats[-1]["reward"] if episode_stats else Constants.SAFETY_FORCE_PENALTY
                 final_state_violation = np.zeros(Constants.STATE_DIM, dtype=np.float32)
-                
-                # actual_initial_state가 기본 차원이면 전체 차원으로 확장
-                if actual_initial_state.shape[0] == Constants.STATE_BASE_DIM:
-                    actual_initial_state_20d = np.concatenate([
-                        actual_initial_state,
-                        np.zeros(Constants.STATE_TRAJECTORY_DIM, dtype=np.float32)
-                    ])
-                else:
-                    actual_initial_state_20d = actual_initial_state
-                
+                initial_state_violation = np.array(actual_initial_state, dtype=np.float32)
+
                 self.agent.store_transition(
-                    actual_initial_state_20d,
+                    initial_state_violation,
                     pid_gains,
                     bad_reward,
                     final_state_violation,
@@ -915,6 +746,7 @@ class PIDGainEnvironment:
             total_samples = len(force_data)
             segment_len = total_samples // num_segments
             
+            state_history = self.episode_state_history
             segments_data = []
             
             for i in range(num_segments):
@@ -924,20 +756,15 @@ class PIDGainEnvironment:
                 seg_force = force_data[start_idx:end_idx]
                 seg_pi = pi_output_data[start_idx:end_idx] if pi_output_data else []
                 seg_len_s = len(seg_force) / (total_samples / self.cfg["EPISODE_SECONDS"])
+                seg_states = state_history[start_idx:end_idx] if state_history else []
                 
                 # 세그먼트 보상 계산
                 seg_reward, seg_metrics = self.calculate_episode_reward(
                     seg_force, seg_pi, self.cfg["TARGET_FORCE"], seg_len_s
                 )
                 
-                # 세그먼트 상태 생성 (20차원)
-                seg_state = self._build_segment_state(
-                    prev_pid_gains=pid_gains,
-                    prev_reward=seg_reward,
-                    force_segment=seg_force,
-                    target_force=self.cfg["TARGET_FORCE"],
-                    segment_len_s=seg_len_s,
-                )
+                # 세그먼트 상태 생성 (6차원)
+                seg_state = self._build_segment_state(seg_states)
                 
                 segments_data.append({
                     "state": seg_state,
@@ -949,23 +776,15 @@ class PIDGainEnvironment:
             # 리플레이 버퍼에 세그먼트별 저장
             for i, seg in enumerate(segments_data):
                 if i == 0:
-                    # 첫 세그먼트: 에피소드 초기 상태 사용 (STATE_DIM 차원으로 변환)
-                    if actual_initial_state.shape[0] == Constants.STATE_BASE_DIM:
-                        # 기본 차원이면 전체 차원으로 확장 (제로 패딩)
-                        current_state = np.concatenate([
-                            actual_initial_state,
-                            np.zeros(Constants.STATE_TRAJECTORY_DIM, dtype=np.float32)
-                        ])
-                    else:
-                        current_state = actual_initial_state
+                    current_state = np.array(actual_initial_state, dtype=np.float32)
                 else:
                     current_state = segments_data[i-1]["state"]
                 
                 if i < num_segments - 1:
-                    next_state = segments_data[i+1]["state"]
+                    next_state = segments_data[i + 1]["state"]
                     done = False
                 else:
-                    next_state = np.zeros_like(seg["state"])
+                    next_state = seg["state"]
                     done = True
                 
                 self.agent.store_transition(
@@ -984,6 +803,15 @@ class PIDGainEnvironment:
                 force_data, pi_output_data, 
                 self.cfg["TARGET_FORCE"], self.cfg["EPISODE_SECONDS"]
             )
+
+            if (ep + 1) % 10 == 0:
+                try:
+                    self._export_control_trace(ep + 1, force_data, state_history)
+                except Exception as e:
+                    self._log(
+                        "ERROR",
+                        f"Failed to export control trace for episode {ep + 1}: {e}",
+                    )
             
             # 표준편차 Annealing 업데이트
             self.agent.update_std_scale(ep)
@@ -1178,9 +1006,18 @@ class PIDGainEnvironment:
                     self.episode_history,
                     self.cfg["RECV_INTERVAL_SEC"],
                 )
-                # 다음 에피소드 PID 게인 선택 (+ ε-greedy: 10 에피소드마다 5% 확률 랜덤)
-                use_random = ((ep + 1) % 10 == 0) and (random.random() < 0.05)
-                if use_random:
+                # 다음 에피소드 PID 게인 선택
+                forced_explore = ep < Constants.FORCED_RANDOM_EPISODES
+                use_random = False  # 100ep 이후엔 ε-greedy 비활성화
+                if ep < Constants.FORCED_RANDOM_EPISODES:
+                    use_random = ((ep + 1) % 10 == 0) and (random.random() < 0.05)
+                if forced_explore:
+                    next_pid_gains = self.agent.select_action_random()
+                    self._log(
+                        "INFO",
+                        f"🎲 초기 강제 탐색: 에피소드 {ep+1}까지 랜덤 PID 사용"
+                    )
+                elif use_random:
                     next_pid_gains = self.agent.select_action_random()
                     self._log(
                         "INFO",
@@ -1207,7 +1044,7 @@ class PIDGainEnvironment:
                 # ✅ 저장된 값 전송
                 self.pid_gains_next[0],
                 self.pid_gains_next[1],
-                0.0,  # 하드웨어에는 항상 D=0.0 전송
+                self.pid_gains_next[2],
                 timing_accurate=True,
                 episode_done=True,
                 learning_done=False,
@@ -1244,6 +1081,10 @@ class PIDGainEnvironment:
                                 t_global,
                                 float(abs(state[0])),
                                 float(abs(self.cfg["TARGET_FORCE"])),
+                            )
+                            monitor.post_pi_output(
+                                t_global,
+                                float(state[5]),
                             )
                             last_monitor_sent = now
                     time.sleep(0.01)  # CPU 부하 방지
@@ -1330,144 +1171,69 @@ class PIDGainEnvironment:
 
         self.comm.close()
 
-    def _build_segment_state(self, prev_pid_gains, prev_reward, force_segment, target_force, segment_len_s):
+    def _build_segment_state(self, state_segment):
         """
-        🆕 세그먼트별 상태 벡터 생성 (STATE_DIM 차원)
-        
-        기본 STATE_BASE_DIM 차원 + 궤적 요약 STATE_TRAJECTORY_DIM 차원
-        
-        Args:
-            prev_pid_gains: [Kp, Ki, Kd]
-            prev_reward: 이전 보상 (또는 현재 세그먼트 보상)
-            force_segment: 힘 궤적 세그먼트 (예: 2000개 샘플 = 2초)
-            target_force: 목표 힘
-            segment_len_s: 세그먼트 길이 (초)
-        
-        Returns:
-            state: STATE_DIM 차원 numpy array
+        세그먼트별 상태 벡터 생성 (STATE_DIM 차원 = 6)
+        세그먼트 마지막 샘플을 사용하여 실시간 상태를 표현한다.
         """
-        import numpy as np
-        
-        # 1. 기본 차원 (로봇PC 6 + 강화학습PC 6)
-        base_state = [
-            prev_pid_gains[0],  # Kp
-            prev_pid_gains[1],  # Ki
-            prev_pid_gains[2],  # Kd
-            prev_reward,
-            target_force,
-            segment_len_s,
-        ]
-        
-        # 기존 6개 통계 (강화학습PC 계산)
-        if force_segment and len(force_segment) >= 10:
-            force = np.array(force_segment, dtype=np.float64)
-            errors = force - target_force
-            
-            base_stats = [
-                float(np.mean(force)),       # 평균
-                float(np.std(force)),        # 표준편차
-                float(np.min(force)),        # 최소
-                float(np.max(force)),        # 최대
-                float(np.mean(errors)),      # 평균 오차
-                float(np.std(errors)),       # 오차 표준편차
-            ]
+        if state_segment:
+            return np.array(state_segment[-1], dtype=np.float32)
+        return np.zeros(Constants.STATE_DIM, dtype=np.float32)
+
+    def _export_control_trace(self, episode_num, force_series, state_history):
+        """
+        10 에피소드마다 현재 힘/목표 힘 궤적을 그래프로 저장하고 원본 CSV를 남긴다.
+        """
+        if not force_series:
+            self._log(
+                "WARNING",
+                f"Skipping force trace export for episode {episode_num}: empty force data",
+            )
+            return
+
+        episode_seconds = float(self.cfg["EPISODE_SECONDS"])
+        sample_count = len(force_series)
+        time_axis = np.linspace(
+            0.0, episode_seconds, sample_count, endpoint=False, dtype=np.float32
+        )
+
+        current_force = np.asarray(force_series, dtype=np.float32)
+
+        if state_history and len(state_history) >= sample_count:
+            target_force = np.asarray(
+                [state[1] for state in state_history[:sample_count]],
+                dtype=np.float32,
+            )
         else:
-            base_stats = [0.0] * 6
-        
-        base_state.extend(base_stats)  # STATE_BASE_DIM 차원 완성
-        
-        # 2. 🆕 궤적 요약 STATE_TRAJECTORY_DIM 차원 추가
-        if not force_segment or len(force_segment) < 10:
-            trajectory_features = [0.0] * Constants.STATE_TRAJECTORY_DIM
-            return np.array(base_state + trajectory_features, dtype=np.float32)
-        
-        force = np.array(force_segment, dtype=np.float64)
-        T_abs = max(abs(target_force), 1.0)
-        errors = force - target_force
-        
-        # (1) Overshoot % 계산
-        if target_force < 0:
-            overshoot = max(0.0, (target_force - np.min(force)) / T_abs * 100.0)
-        else:
-            overshoot = max(0.0, (np.max(force) - target_force) / T_abs * 100.0)
-        
-        # (2) Settling Time (간단 버전)
-        fs_hz = len(force) / max(segment_len_s, 1e-6)
-        tol_settling = max(Constants.SETTLING_BAND_TOLERANCE, 0.01 * T_abs)
-        in_settling = np.abs(errors) <= tol_settling
-        settling_idx = len(force)
-        
-        hold_samples = int(fs_hz * Constants.SETTLING_HOLD_TIME_S)
-        for i in range(len(in_settling) - hold_samples):
-            if in_settling[i:i+hold_samples].all():
-                settling_idx = i
-                break
-        settling_time = float(settling_idx / fs_hz)
-        
-        # (3) RMSE
-        rmse = float(np.sqrt(np.mean(errors**2)))
-        
-        # (4) Band Ratio
-        band_ratio = float(np.mean(np.abs(errors) <= Constants.BAND_TOLERANCE_N))
-        
-        # (5-6) 진동 주파수 & 진폭 (FFT)
-        if len(errors) > 100:
-            windowed = errors * np.hanning(len(errors))
-            fft = np.fft.rfft(windowed)
-            psd = np.abs(fft)**2
-            freqs = np.fft.rfftfreq(len(errors), d=1.0/fs_hz)
-            
-            valid_idx = (freqs >= 0.1) & (freqs <= 50.0)
-            if valid_idx.any():
-                psd_valid = psd[valid_idx]
-                freqs_valid = freqs[valid_idx]
-                peak_idx = np.argmax(psd_valid)
-                oscillation_freq = float(freqs_valid[peak_idx])
-                oscillation_amp = float(np.sqrt(psd_valid[peak_idx]) / len(errors))
-            else:
-                oscillation_freq = 0.0
-                oscillation_amp = 0.0
-        else:
-            oscillation_freq = 0.0
-            oscillation_amp = 0.0
-        
-        # (7) Rise Time (10% → 90%)
-        force_initial = float(force[0])
-        force_final = float(np.mean(force[-max(1, int(len(force)*0.1)):]))
-        target_10 = force_initial + 0.1 * (force_final - force_initial)
-        target_90 = force_initial + 0.9 * (force_final - force_initial)
-        
-        try:
-            if target_force < 0:
-                idx_10 = np.where(force <= target_10)[0][0]
-                idx_90 = np.where(force <= target_90)[0][0]
-            else:
-                idx_10 = np.where(force >= target_10)[0][0]
-                idx_90 = np.where(force >= target_90)[0][0]
-            rise_time = float(abs(idx_90 - idx_10) / fs_hz)
-        except:
-            rise_time = 0.0
-        
-        # (8) Steady State Error
-        steady_state_error = float(force_final - target_force)
-        
-        # 통합
-        trajectory_features = [
-            overshoot,           # 1
-            settling_time,       # 2
-            rmse,                # 3
-            band_ratio,          # 4
-            oscillation_freq,    # 5
-            oscillation_amp,     # 6
-            rise_time,           # 7
-            steady_state_error,  # 8
-        ]
-        
-        state = np.array(base_state + trajectory_features, dtype=np.float32)
-        
-        # NaN/Inf 가드
-        if np.isnan(state).any() or np.isinf(state).any():
-            self._log("ERROR", f"❌ 상태 벡터에 NaN/Inf 발견! 제로 패딩 대체")
-            state = np.nan_to_num(state, nan=0.0, posinf=0.0, neginf=0.0)
-        
-        return state
+            target_force = np.full(sample_count, self.cfg["TARGET_FORCE"], dtype=np.float32)
+
+        episode_tag = f"ep_{episode_num:04d}"
+        csv_path = os.path.join(self.control_log_dir, f"{episode_tag}_force_trace.csv")
+        png_path = os.path.join(self.control_log_dir, f"{episode_tag}_force_trace.png")
+
+        with open(csv_path, "w", newline="") as csv_file:
+            writer = csv.writer(csv_file)
+            writer.writerow(["time_s", "current_force_N", "target_force_N"])
+            for t, cf, tf in zip(time_axis, current_force, target_force):
+                writer.writerow([f"{t:.6f}", f"{cf:.6f}", f"{tf:.6f}"])
+
+        plt.figure(figsize=(10, 5))
+        current_abs = np.abs(current_force)
+        target_abs = np.abs(target_force)
+        plt.plot(time_axis, current_abs, color="black", linewidth=1.5, label="|Current Force|")
+        plt.plot(time_axis, target_abs, color="red", linewidth=1.2, linestyle="--", label="|Target Force|")
+
+        plt.title(f"Episode {episode_num} Force Trace", fontsize=14)
+        plt.xlabel("Time [s]", fontsize=12)
+        plt.ylabel("|Force| [N]", fontsize=12)
+        plt.xlim(0.0, episode_seconds)
+        plt.grid(True, alpha=0.3)
+        plt.legend(loc="best", fontsize=10)
+        plt.tight_layout()
+        plt.savefig(png_path, dpi=300)
+        plt.close()
+
+        self._log(
+            "INFO",
+            f"Saved control trace for episode {episode_num}: {os.path.basename(png_path)} / {os.path.basename(csv_path)}",
+        )

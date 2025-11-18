@@ -4,7 +4,7 @@
 - __main__.py의 로직 재사용
 - 세그먼트 분할 학습 지원 (1 에피소드 = 5 transition)
 - 표준편차 Annealing 지원
-- STATE_DIM 동적 계산 (20차원)
+- STATE_DIM 동적 계산 (6차원)
 """
 import argparse
 import os
@@ -125,7 +125,7 @@ def main():
     print(f"📊 에피소드 수: {config.episodes}")
     print(f"🧠 학습률: Actor={config.lr_actor:.2e}, Critic={config.lr_critic:.2e}")
     print(f"📦 배치 크기: {config.batch_size}")
-    print(f"✅ STATE_DIM: {config_dict['STATE_DIM']}차원 (기본 {Constants.STATE_BASE_DIM} + 궤적 {Constants.STATE_TRAJECTORY_DIM})")
+    print(f"✅ STATE_DIM: {config_dict['STATE_DIM']}차원 (현재 힘/목표 힘/오차 기반 6개 값)")
     print(f"✅ 세그먼트 분할: {Constants.NUM_SEGMENTS}개 ({Constants.SEGMENT_LENGTH_S}초씩)")
     print(f"✅ 탐험 설정: alpha={Constants.ACTOR_INITIAL_ALPHA}, log_std_max={Constants.ACTOR_LOG_STD_MAX}")
     print(f"✅ 표준편차 Annealing: {Constants.STD_ANNEAL_INITIAL} → {Constants.STD_ANNEAL_FINAL}")

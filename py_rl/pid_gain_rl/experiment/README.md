@@ -59,7 +59,7 @@ python3 -m pid_gain_rl.experiment.config
 ### Method 3: CLI interface
 ```bash
 cd /home/katech/Robot-Polishing-RL-system/py_rl
-python3 -m pid_gain_rl.experiment.config.main --episodes 500 --target-force -40.0
+python3 -m pid_gain_rl.experiment.config.main --episodes 500 --target-force -50.0
 ```
 
 ## 📖 Documentation
@@ -71,5 +71,7 @@ Each folder contains:
 ## ⚠️ Note
 
 All import paths have been updated to reflect the new structure. The root-level `__main__.py` and `main.py` are maintained for backward compatibility.
+
+
 
 
