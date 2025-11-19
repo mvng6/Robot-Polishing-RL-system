@@ -19,9 +19,9 @@ class Constants:
     
     # PID 범위 (새 범위: 오버슈트 억제 및 댐핑 효과 확보)
     DEFAULT_PID_RANGE = {
-        "Kp": (5.0, 80.0),
-        "Ki": (10.0, 100.0),
-        "Kd": (0.0, 1e-2),
+        "Kp": (1.0, 70.0),
+        "Ki": (0.0, 70.0),
+        "Kd": (0.0, 3e-2),
     }
     
     # 통신 기본 설정
@@ -70,7 +70,13 @@ class Constants:
     SETTLING_HOLD_TIME_S = 0.5  # 정착 판정을 위한 밴드 유지 시간 (초)
     REWARD_MIN = -1.0
     REWARD_MAX = 1.0
-    REWARD_ERROR_REF_PERCENT = 40.0  # 평균 %오차가 이 값일 때 보상 -1 (선형 스케일)
+    REWARD_ERROR_REF_PERCENT = 30.0  # 평균 %오차가 이 값일 때 보상 -1 (선형 스케일)
+    
+    # 수집/보상 창 워밍업 구간 (에피소드 시작 시 이 시간은 평가에서 제외)
+    WARMUP_SKIP_SECONDS = 0.0
+    
+    # 타겟 도달 감지 (보상 카운트 시작 기준)
+    TARGET_REACHED_TOLERANCE_N = 0.5  # 목표 힘과 이 이하 차이일 때부터 보상/세그먼트 카운트 시작
     
     # 제어 물리 상수
     BAND_TOLERANCE_N = 1.5
@@ -85,14 +91,14 @@ class Constants:
     
     # ===== 🔥 표준편차 Annealing 설정 =====
     STD_ANNEAL_START_EPISODE = 0
-    STD_ANNEAL_END_EPISODE = 150  # 200 → 150 (더 빠르게)
+    STD_ANNEAL_END_EPISODE = 180  # 전환을 더 부드럽게
     STD_ANNEAL_INITIAL = 1.2  # 초반 더 넓은 탐색
-    STD_ANNEAL_FINAL = 0.4  # 후반 더 탐욕적
+    STD_ANNEAL_FINAL = 0.5  # 후반 탐욕 전환을 완만히
     
     # ===== Target Entropy 동적 조정 설정 =====
     TARGET_ENTROPY_INITIAL_FACTOR = -1.2  # 초기 100ep: 더 공격적 탐색
     TARGET_ENTROPY_FINAL_FACTOR = -0.9    # 이후: 더 탐욕적
-    TARGET_ENTROPY_TRANSITION_EPISODES = 80  # 전환 에피소드 수 단축
+    TARGET_ENTROPY_TRANSITION_EPISODES = 120  # 전환 더 완만하게
 
     # ===== 초기 강제 탐색 설정 =====
     FORCED_RANDOM_EPISODES = 80  # 초기 80 에피소드: PID 랜덤 샘플로 탐색 공간 골고루 채우기

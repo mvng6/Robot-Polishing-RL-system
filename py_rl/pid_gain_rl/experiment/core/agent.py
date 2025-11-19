@@ -448,7 +448,7 @@ class PIDGainSACAgent:
         kd_lo_safe = 1e-8 if kd_lo <= 0.0 else kd_lo
         kd_hi_safe = max(kd_hi, kd_lo_safe * 10.0)
 
-        linear_kd = (kd_lo <= 0.0) or (kd_hi <= 0.02)
+        linear_kd = (kd_lo <= 0.0) or (kd_hi <= 0.03)
 
         if use_lhs:
             # LHS 샘플링
@@ -487,7 +487,7 @@ class PIDGainSACAgent:
             # PID를 액션으로 변환 (scale_action_to_pid의 역함수)
             kp_norm = 2.0 * (kp - pid_range["Kp"][0]) / (pid_range["Kp"][1] - pid_range["Kp"][0]) - 1.0
             ki_norm = 2.0 * (ki - pid_range["Ki"][0]) / (pid_range["Ki"][1] - pid_range["Ki"][0]) - 1.0
-            linear_kd = (kd_lo <= 0.0) or (pid_range["Kd"][1] <= 0.02)
+            linear_kd = (kd_lo <= 0.0) or (pid_range["Kd"][1] <= 0.03)
             if linear_kd:
                 kd_norm = 2.0 * (kd - max(pid_range["Kd"][0], 0.0)) / (pid_range["Kd"][1] - max(pid_range["Kd"][0], 0.0) + 1e-8) - 1.0
             else:
@@ -550,23 +550,25 @@ class PIDGainSACAgent:
 
     def update_lr_schedule(self, episode_num):
         """
-        100 에피소드 이후 학습률을 절반으로 낮춰 후반 수렴을 안정화
+        학습률 스케줄:
+        - ep <150: 기본 학습률 유지
+        - ep >=150: 0.7배로 한 번만 낮춰 후반 수렴을 완만하게
         """
         if self.lr_scaled:
             return
-        if episode_num >= 100:
+        if episode_num >= 150:
             for param_group in self.actor_opt.param_groups:
-                param_group["lr"] = self.base_lr_actor * 0.5
+                param_group["lr"] = self.base_lr_actor * 0.7
             for param_group in self.critic_opt.param_groups:
-                param_group["lr"] = self.base_lr_critic * 0.5
+                param_group["lr"] = self.base_lr_critic * 0.7
             if self.auto_entropy_tuning:
                 for param_group in self.alpha_opt.param_groups:
-                    param_group["lr"] = self.cfg["LR"] * 0.5
+                    param_group["lr"] = self.cfg["LR"] * 0.7
             self.lr_scaled = True
             print(
                 f"🧠 [LR 스케줄] 에피소드 {episode_num} 이후 "
-                f"Actor LR={self.base_lr_actor*0.5:.2e}, "
-                f"Critic LR={self.base_lr_critic*0.5:.2e}"
+                f"Actor LR={self.base_lr_actor*0.7:.2e}, "
+                f"Critic LR={self.base_lr_critic*0.7:.2e}"
             )
 
     def save_model(self, path):

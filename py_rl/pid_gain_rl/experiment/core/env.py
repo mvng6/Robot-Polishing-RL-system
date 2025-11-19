@@ -66,6 +66,10 @@ class PIDGainEnvironment:
         self.ldlogger = LearningDoneLogger(self.cfg["LOG_DIR"])
         self.control_log_dir = os.path.join(self.ldlogger.log_dir, "control_log")
         os.makedirs(self.control_log_dir, exist_ok=True)
+        # run log 디렉토리 및 파일
+        self.run_log_dir = os.path.join(self.ldlogger.log_dir, "log")
+        os.makedirs(self.run_log_dir, exist_ok=True)
+        self.run_log_path = os.path.join(self.run_log_dir, "run.log")
 
         # 2. 나머지 Logger들은 learning_done 폴더 안에 서브폴더 생성
         self.cplogger = ControlPerformanceLogger(self.ldlogger.log_dir)
@@ -92,6 +96,14 @@ class PIDGainEnvironment:
 
     def _log(self, level, message):
         AppLogger.log(level, message)
+
+    def _run_log(self, message):
+        try:
+            with open(self.run_log_path, "a") as f:
+                f.write(message + "\n")
+        except Exception:
+            # 파일 쓰기 실패해도 학습 중단하지 않음
+            pass
 
 
     def calculate_episode_reward(
@@ -269,11 +281,11 @@ class PIDGainEnvironment:
 
         current_force = force_data[-1]
 
-        # 안전 위반 체크
-        if current_force > self.safety_force_limit:
+        # 안전 위반 체크 (절댓값 기준)
+        if abs(current_force) > self.safety_force_limit:
             self._log(
                 "WARNING",
-                f"안전 위반: 힘 {current_force:.1f}N > {self.safety_force_limit}N",
+                f"안전 위반: 힘 {current_force:.1f}N (한계: ±{self.safety_force_limit}N)",
             )
             return True, "safety_violation"
 
@@ -369,11 +381,12 @@ class PIDGainEnvironment:
             # 에피소드별 리셋 없음 (연속 모니터링)
 
             self.episode_count = ep
+            self._run_log(f"[Ep {ep+1}] start_wall={time.time():.3f}")
             
             # 🆕 Target Entropy 동적 조정
             self.agent.update_target_entropy(ep)
             
-            # 🆕 학습률 스케줄: 100ep 이후 절반 감소
+            # 🆕 학습률 스케줄
             self.agent.update_lr_schedule(ep)
             
             # 🆕 탐색 메트릭 로깅 (20 에피소드마다)
@@ -411,11 +424,11 @@ class PIDGainEnvironment:
                 # 첫 에피소드: 로봇제어PC 자체 PID 사용 (P=40, I=50, D=0)
                 pid_gains = np.array([40.0, 50.0, 0.0], dtype=np.float32)
                 print(
-                    f"🎯 [에피소드 1] 로봇제어PC 자체 PID 사용: Kp={pid_gains[0]:.0f}, Ki={pid_gains[1]:.0f}, Kd={pid_gains[2]:.0f}"
+                    f"🎯 [에피소드 1] 로봇제어PC 자체 PID 사용: Kp={pid_gains[0]:.2f}, Ki={pid_gains[1]:.2f}, Kd={pid_gains[2]:.3f}"
                 )
                 self._log(
                     "INFO",
-                    f"🎯 에피소드 1 기준 PID: Kp={pid_gains[0]:.0f}, Ki={pid_gains[1]:.0f}, Kd={pid_gains[2]:.0f}",
+                    f"🎯 에피소드 1 기준 PID: Kp={pid_gains[0]:.2f}, Ki={pid_gains[1]:.2f}, Kd={pid_gains[2]:.3f}",
                 )
             else:
                 # 2번째 에피소드부터: 이전 에피소드 종료 시 전송한 PID 사용
@@ -424,7 +437,7 @@ class PIDGainEnvironment:
                 ), f"에피소드 {ep+1}: 이전 에피소드에서 next PID가 설정되지 않았습니다!"
                 pid_gains = self.pid_gains_next.copy()
                 print(
-                    f"🤖 [에피소드 {ep+1}] PID: Kp={pid_gains[0]:.2f}, Ki={pid_gains[1]:.2f}, Kd={pid_gains[2]:.2f}"
+                    f"🤖 [에피소드 {ep+1}] PID: Kp={pid_gains[0]:.2f}, Ki={pid_gains[1]:.2f}, Kd={pid_gains[2]:.3f}"
                 )
 
                 # ⭐ 에피소드 시작 신호: episode_done=False 전송 (플래그 리셋)
@@ -438,6 +451,11 @@ class PIDGainEnvironment:
                     learning_done=False,
                 )
 
+            # 모니터에 현재 PID 표시
+            monitor.post_pid(pid_gains)
+            self._run_log(
+                f"[Ep {ep+1}] PID Kp={pid_gains[0]:.2f} Ki={pid_gains[1]:.2f} Kd={pid_gains[2]:.3f}"
+            )
             # 3. PID 적용 대기
             time.sleep(0.1)
 
@@ -519,30 +537,90 @@ class PIDGainEnvironment:
                     if time.perf_counter() - wait_start > 30.0:
                         break
 
-            # sander_active 상승 에지부터 동적 길이 데이터 수집
+            # sander_active 상승 에지를 기준으로 데이터 수집/보상 계산 시작
             self._log(
                 "INFO",
-                f"📊 {self.cfg['EPISODE_SECONDS']:.0f}초 1kHz 데이터 수집 시작...",
+                f"📊 sander_active 상승 에지 대기 후 {self.cfg['EPISODE_SECONDS']:.0f}초 1kHz 데이터 수집 시작...",
             )
-            start_time = time.perf_counter()
-            self.episode_start_time = start_time  # 에피소드 시작 시간 기록
-
+            wall_start_time = time.perf_counter()
+            activation_seen = False  # False→True 전환 감지 여부
+            activation_time = None   # sander_active 상승 시각
+            collect_start_time = None
+            collect_end_time = None
+            effective_start_time = None  # 워밍업 이후 실데이터 시작 시각
+            duration_start_time = None
+            self.episode_start_time = None
+            
             data_count = 0
             prev_error = 0.0
             prev_pi_output = 0.0
             last_monitor_sent = 0.0  # 모니터 전송용 타이머
+            activation_timeout = self.cfg["EPISODE_SECONDS"] + 60.0  # 상승 에지 대기 최대치
 
-            # 주기 고정 방식으로 1kHz 정확도 향상
             dt = 0.001  # 1ms
-            t_next = time.perf_counter()
+            t_next = None
 
-            while (time.perf_counter() - start_time) < self.cfg[
-                "EPISODE_SECONDS"
-            ]:
+            data_valid = True  # 목표 미도달 등으로 데이터 무효 시 False
+            while True:
+                now = time.perf_counter()
+
+                # 종료 시점 도달 시 루프 탈출
+                if (
+                    effective_start_time is not None
+                    and collect_end_time is not None
+                    and now >= collect_end_time
+                ):
+                    break
+
                 state, sander_active = self.comm.get_latest_state()
                 if state is None:
                     time.sleep(0.001)
                     continue
+
+                # 🚦 상승 에지 감지 전: sander_active True 되면 타임라인/버퍼 리셋 후 시작
+                if not activation_seen:
+                    if sander_active:
+                        activation_seen = True
+                        activation_time = now
+                        collect_start_time = activation_time + Constants.WARMUP_SKIP_SECONDS
+                        effective_collect_duration = max(
+                            0.0, self.cfg["EPISODE_SECONDS"] - Constants.WARMUP_SKIP_SECONDS
+                        )
+                        collect_end_time = collect_start_time + effective_collect_duration
+                        duration_start_time = collect_start_time
+                        self.episode_start_time = collect_start_time
+
+                        # 워밍업 이전 데이터는 폐기하고 새로 시작
+                        self.episode_state_history.clear()
+                        self.episode_force_data.clear()
+                        self.episode_pi_output_data.clear()
+                        data_count = 0
+                        prev_error = 0.0
+                        prev_pi_output = 0.0
+                        t_next = None
+                        self._log(
+                            "INFO",
+                            f"✅ sander_active 상승 감지 → 워밍업 {Constants.WARMUP_SKIP_SECONDS}s 후 수집 시작",
+                        )
+                    else:
+                        # 상승 에지 대기 타임아웃
+                        if (now - wall_start_time) > activation_timeout:
+                            print("⚠️ sander_active 상승 에지 미검출 - 에피소드 스킵")
+                            data_valid = False
+                            break
+                        continue
+
+                # 활성화 후 다시 False로 내려가면 로봇 초기화 상태이므로 수집 종료
+                if activation_seen and not sander_active:
+                    print("⚠️ sander_active 하강 감지 - 데이터 수집 종료")
+                    break
+
+                # 워밍업 구간 동안에는 기록하지 않음
+                if effective_start_time is None:
+                    if now < collect_start_time:
+                        continue
+                    effective_start_time = collect_start_time
+                    t_next = now
 
                 self.episode_state_history.append(np.array(state, dtype=np.float32))
                 self.episode_force_data.append(state[0])  # 힘 데이터 수집
@@ -588,7 +666,7 @@ class PIDGainEnvironment:
                             "out_of_band_time": self.cfg["EPISODE_SECONDS"],
                         },
                         "pid_gains": pid_gains.copy(),
-                        "duration": time.perf_counter() - start_time,
+                        "duration": time.perf_counter() - duration_start_time,
                         "safety_violation": True,
                     })
                     
@@ -668,6 +746,8 @@ class PIDGainEnvironment:
                     prev_pi_output = state[5]
 
                 # 주기 고정 방식으로 정확한 1kHz 수집
+                if t_next is None:
+                    t_next = time.perf_counter()
                 t_next += dt
                 delay = t_next - time.perf_counter()
                 if delay > 0:
@@ -688,6 +768,9 @@ class PIDGainEnvironment:
                         float(state[5]),
                     )
                     last_monitor_sent = now
+
+            if duration_start_time is None:
+                duration_start_time = wall_start_time
 
             print(
                 f"📈 [수집] 완료: {data_count}개 데이터 (목표: {int(self.cfg['EPISODE_SECONDS'] * 1000)})"
@@ -737,8 +820,24 @@ class PIDGainEnvironment:
             force_data = self.episode_force_data
             pi_output_data = self.episode_pi_output_data
             
-            if not force_data:
-                print("❌ 데이터 수집 실패 - 다음 에피소드로")
+            if (not data_valid) or (not force_data):
+                print("⚠️ 목표 미도달/데이터 없음으로 학습 건너뜀")
+                self._log("WARNING", f"에피소드 {ep+1}: 목표 미도달 또는 데이터 없음, 업데이트 스킵")
+                self._run_log(f"[Ep {ep+1}] skip (no data)")
+                total_reward = Constants.REWARD_MIN
+                final_metrics = {
+                    "rmse": 0.0,
+                    "overshoot": 0.0,
+                    "settling_time": 0.0,
+                    "band_time": 0.0,
+                    "band_ratio": 0.0,
+                    "reward_score": total_reward,
+                    "r_centered": total_reward,
+                    "r_baseline": 0.0,
+                }
+                self.agent.episode_rewards.append(total_reward)
+                self.pid_gains_next = pid_gains.copy()
+                monitor.post_reward(ep + 1, float(total_reward))
                 continue
             
             # 세그먼트 분할
@@ -806,7 +905,7 @@ class PIDGainEnvironment:
 
             if (ep + 1) % 10 == 0:
                 try:
-                    self._export_control_trace(ep + 1, force_data, state_history)
+                    self._export_control_trace(ep + 1, force_data, state_history, pid_gains)
                 except Exception as e:
                     self._log(
                         "ERROR",
@@ -833,7 +932,7 @@ class PIDGainEnvironment:
             monitor.post_reward(ep + 1, float(total_reward))
 
             # 통계 업데이트
-            episode_duration = time.perf_counter() - start_time
+            episode_duration = time.perf_counter() - duration_start_time
             episode_stat = {
                 "episode": ep + 1,
                 "duration": episode_duration,
@@ -876,16 +975,22 @@ class PIDGainEnvironment:
                 best_reward = total_reward
             
             # 최고 성능 PID gain 저장 (50 에피소드 이후 최고 보상만 저장)
-            if (ep + 1) >= Constants.MIN_EPISODES_FOR_SAVING:
-                if total_reward >= best_reward_after_min:
-                    best_reward_after_min = total_reward
-                    best_pid_gains = pid_gains.copy()
-                    self.agent.save_model(
-                        f"{model_save_dir}/best_pid_agent_episode_{ep+1}_reward_{best_reward_after_min:.2f}.pth"
-                    )
-                    print(
-                        f"💾 [저장] 최고 성능 에이전트 저장: 에피소드 {ep+1}, 보상 {best_reward_after_min:.2f}"
-                    )
+                if (ep + 1) >= Constants.MIN_EPISODES_FOR_SAVING:
+                    if total_reward >= best_reward_after_min:
+                        best_reward_after_min = total_reward
+                        best_pid_gains = pid_gains.copy()
+                        kp, ki, kd = pid_gains
+                        fname = (
+                            f"best_pid_agent_ep{ep+1}_"
+                            f"Kp{kp:.2f}_Ki{ki:.2f}_Kd{kd:.3f}_"
+                            f"rew{best_reward_after_min:.2f}.pth"
+                        )
+                        self.agent.save_model(
+                            f"{model_save_dir}/{fname}"
+                        )
+                        print(
+                            f"💾 [저장] 최고 성능 에이전트 저장: 에피소드 {ep+1}, 보상 {best_reward_after_min:.2f}"
+                        )
 
             # 8. 학습 (안정적 gradient 추정을 위한 최소 버퍼 크기 보장)
             # 중요: 학습을 먼저 수행한 후 다음 PID를 계산해야 학습된 네트워크 사용!
@@ -902,46 +1007,27 @@ class PIDGainEnvironment:
                     max(Constants.MIN_BATCH_SIZE, buffer_size // 2)  # 버퍼의 절반 사용
                 )
                 
-                print(
-                    f"🧠 [학습] 강화학습 업데이트 중... (에피소드 {ep+1}, {actual_updates}회, "
-                    f"배치크기: {effective_batch_size}, 버퍼: {buffer_size}개)"
-                )
-                
                 self.agent.update_parameters_one_step(
                     effective_batch_size, actual_updates
                 )
-                
-                print(
-                    f"✅ [학습] 신경망 업데이트 완료! 다음 에피소드는 학습된 네트워크 사용"
-                )
-                self._log(
-                    "INFO", 
-                    f"🧠 학습 완료: {actual_updates}회 업데이트, 배치={effective_batch_size}"
-                )
+                updates_done = actual_updates
             else:
                 # 초기 탐색 단계 (학습 없이 데이터만 수집)
-                print(
-                    f"📊 [에피소드 {ep+1}] 초기 탐색 중... (버퍼: {buffer_size}/{Constants.MIN_BUFFER_FOR_LEARNING}개, "
-                    f"학습 시작까지 {Constants.MIN_BUFFER_FOR_LEARNING - buffer_size}개 필요)"
-                )
-                self._log(
-                    "INFO",
-                    f"📊 초기 탐색: 버퍼 {buffer_size}/{Constants.MIN_BUFFER_FOR_LEARNING}개"
-                )
+                updates_done = 0
 
-            # 9. 로깅 (상세)
-            self._log("INFO", f"🎯 에피소드 {ep+1} 완료")
-            self._log("INFO", f"⏱️  지속시간: {episode_duration:.1f}s")
-            self._log("INFO", f"🏆 보상: {total_reward:.2f}")
-            self._log("INFO", f"📊 RMSE: {final_metrics['rmse']:.2f}")
-            self._log("INFO", f"📈 오버슈트: {final_metrics['overshoot']:.1f}%")
-            self._log("INFO", f"⏰ 정착시간: {final_metrics['settling_time']:.2f}s")
-            self._log("INFO", f"🎯 밴드유지: {final_metrics['band_time']:.1f}s")
-            # 50 에피소드 이후 최고 보상 표시 (저장 대상)
-            if (ep + 1) >= Constants.MIN_EPISODES_FOR_SAVING:
-                self._log("INFO", f"🏅 전체 최고보상: {best_reward:.2f}, 저장 대상 최고보상: {best_reward_after_min:.2f}")
-            else:
-                self._log("INFO", f"🏅 전체 최고보상: {best_reward:.2f} (저장 대기 중, {Constants.MIN_EPISODES_FOR_SAVING} 에피소드 이후 저장 시작)")
+            # 9. 요약 로그 (터미널)
+            summary = (
+                f"[Ep {ep+1}] "
+                f"PID Kp={pid_gains[0]:.2f} Ki={pid_gains[1]:.2f} Kd={pid_gains[2]:.3f} | "
+                f"R={total_reward:.2f} | "
+                f"RMSE={final_metrics['rmse']:.2f} ov={final_metrics['overshoot']:.1f}% "
+                f"band={final_metrics['band_ratio']:.2f} | "
+                f"buf={buffer_size} upd={updates_done}"
+                f"{' (no-learn)' if updates_done==0 else ''} "
+                f"std={self.agent.std_scale:.2f}"
+            )
+            print(summary)
+            self._log("INFO", summary)
 
             # 10. 이전 에피소드 정보 업데이트
             self.previous_pid_gains = pid_gains.copy()
@@ -1031,7 +1117,7 @@ class PIDGainEnvironment:
                     next_pid_gains.copy()
                 )  # ✅ 저장! (다음 에피소드에서 사용)
                 print(
-                    f"🎯 다음 에피소드 PID: Kp={next_pid_gains[0]:.2f}, Ki={next_pid_gains[1]:.2f}, Kd={next_pid_gains[2]:.2f}"
+                    f"🎯 다음 에피소드 PID: Kp={next_pid_gains[0]:.2f}, Ki={next_pid_gains[1]:.2f}, Kd={next_pid_gains[2]:.3f}"
                 )
             else:
                 # 마지막 에피소드인 경우 현재 PID 사용
@@ -1180,18 +1266,23 @@ class PIDGainEnvironment:
             return np.array(state_segment[-1], dtype=np.float32)
         return np.zeros(Constants.STATE_DIM, dtype=np.float32)
 
-    def _export_control_trace(self, episode_num, force_series, state_history):
+    def _export_control_trace(self, episode_num, force_series, state_history, pid_gains):
         """
         10 에피소드마다 현재 힘/목표 힘 궤적을 그래프로 저장하고 원본 CSV를 남긴다.
         """
         if not force_series:
             self._log(
                 "WARNING",
-                f"Skipping force trace export for episode {episode_num}: empty force data",
+                f"Skipping force trace export for episode {episode_num}: empty force data (target not reached or timeout)",
             )
             return
 
-        episode_seconds = float(self.cfg["EPISODE_SECONDS"])
+        # 타임축: 워밍업 제외한 길이(기본 10초) - NameError 방지용 명확 변수 사용
+        episode_seconds = max(
+            0.0, self.cfg["EPISODE_SECONDS"] - Constants.WARMUP_SKIP_SECONDS
+        )
+        if episode_seconds <= 0.0:
+            episode_seconds = float(self.cfg["EPISODE_SECONDS"])
         sample_count = len(force_series)
         time_axis = np.linspace(
             0.0, episode_seconds, sample_count, endpoint=False, dtype=np.float32
@@ -1207,7 +1298,8 @@ class PIDGainEnvironment:
         else:
             target_force = np.full(sample_count, self.cfg["TARGET_FORCE"], dtype=np.float32)
 
-        episode_tag = f"ep_{episode_num:04d}"
+        kp, ki, kd = pid_gains
+        episode_tag = f"ep_{episode_num:04d}_Kp{kp:.2f}_Ki{ki:.2f}_Kd{kd:.3f}"
         csv_path = os.path.join(self.control_log_dir, f"{episode_tag}_force_trace.csv")
         png_path = os.path.join(self.control_log_dir, f"{episode_tag}_force_trace.png")
 
@@ -1217,23 +1309,29 @@ class PIDGainEnvironment:
             for t, cf, tf in zip(time_axis, current_force, target_force):
                 writer.writerow([f"{t:.6f}", f"{cf:.6f}", f"{tf:.6f}"])
 
-        plt.figure(figsize=(10, 5))
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
+
+        fig = Figure(figsize=(10, 5))
+        canvas = FigureCanvas(fig)
+        ax = fig.add_subplot(111)
         current_abs = np.abs(current_force)
         target_abs = np.abs(target_force)
-        plt.plot(time_axis, current_abs, color="black", linewidth=1.5, label="|Current Force|")
-        plt.plot(time_axis, target_abs, color="red", linewidth=1.2, linestyle="--", label="|Target Force|")
+        ax.plot(time_axis, current_abs, color="black", linewidth=1.5, label="Current Force")
+        ax.plot(time_axis, target_abs, color="red", linewidth=1.2, linestyle="--", label="Target Force")
 
-        plt.title(f"Episode {episode_num} Force Trace", fontsize=14)
-        plt.xlabel("Time [s]", fontsize=12)
-        plt.ylabel("|Force| [N]", fontsize=12)
-        plt.xlim(0.0, episode_seconds)
-        plt.grid(True, alpha=0.3)
-        plt.legend(loc="best", fontsize=10)
-        plt.tight_layout()
-        plt.savefig(png_path, dpi=300)
-        plt.close()
+        ax.set_title(f"Episode {episode_num} Force Trace", fontsize=14)
+        ax.set_xlabel("Time [s]", fontsize=12)
+        ax.set_ylabel("Force [N]", fontsize=12)
+        ax.set_xlim(0.0, episode_seconds)
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc="best", fontsize=10)
+
+        fig.tight_layout()
+        fig.savefig(png_path, dpi=300, bbox_inches="tight")
 
         self._log(
             "INFO",
             f"Saved control trace for episode {episode_num}: {os.path.basename(png_path)} / {os.path.basename(csv_path)}",
         )
+        self._run_log(f"[Ep {episode_num}] saved control_log ({os.path.basename(png_path)})")

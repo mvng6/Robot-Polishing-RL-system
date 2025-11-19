@@ -50,6 +50,19 @@ class RLRealtimeMonitor:
         except Full:
             pass
 
+    def post_pid(self, pid_gains):
+        """현재 적용 PID(Kp, Ki, Kd)를 GUI에 표시"""
+        msg = {
+            "type": "pid",
+            "kp": float(pid_gains[0]),
+            "ki": float(pid_gains[1]),
+            "kd": float(pid_gains[2]),
+        }
+        try:
+            self.q.put_nowait(msg)
+        except Full:
+            pass
+
     def post_pi_output(self, t_sec: float, pi_output: float):
         msg = {"type": "pi", "t": float(t_sec), "pi": float(pi_output)}
         try:
@@ -136,6 +149,17 @@ class RLRealtimeMonitor:
             va="top",
             bbox=dict(facecolor="white", alpha=0.7, edgecolor="none"),
         )
+        # PID annotation (top-center)
+        pid_text = fig.text(
+            0.02,
+            0.92,
+            "PID: ---",
+            fontsize=10,
+            fontweight="bold",
+            ha="left",
+            va="top",
+            bbox=dict(facecolor="white", alpha=0.7, edgecolor="none"),
+        )
 
         interval_ms = int(1000 / self.hz)
 
@@ -181,6 +205,10 @@ class RLRealtimeMonitor:
                     ep_rew.append(float(msg["rew"]))
                 elif tp == "pi":
                     latest_pi = float(msg["pi"])
+                elif tp == "pid":
+                    pid_text.set_text(
+                        f"PID: Kp={msg['kp']:.2f}, Ki={msg['ki']:.2f}, Kd={msg['kd']:.3f}"
+                    )
 
             if len(tbuf) >= 2:
                 t = np.asarray(tbuf, dtype=float)

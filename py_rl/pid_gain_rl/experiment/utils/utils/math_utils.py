@@ -23,7 +23,7 @@ def scale_action_to_pid(action, pid_range):
     kd_lo, kd_hi = pid_range["Kd"]
     pid_gains = np.array([kp, ki, 0.0], dtype=np.float32)
 
-    use_linear_kd = (kd_lo <= 0.0) or (kd_hi <= 0.02)
+    use_linear_kd = (kd_lo <= 0.0) or (kd_hi <= 0.03)
     if use_linear_kd:
         kd = (a[2] + 1.0) * 0.5 * (kd_hi - max(kd_lo, 0.0))
     else:
@@ -34,16 +34,16 @@ def scale_action_to_pid(action, pid_range):
         kd = float(10 ** kdL)
     pid_gains[2] = kd
 
-    def quantize(value, lo, hi, step=0.01):
+    def quantize(value, lo, hi, step=0.01, decimals=2):
         value = np.clip(value, lo, hi)
         quantized = np.round(value / step) * step
         quantized = np.clip(quantized, lo, hi)
-        return float(np.round(quantized, 2))
+        return float(np.round(quantized, decimals))
 
     pid_gains[0] = quantize(pid_gains[0], kp_lo, kp_hi)
     pid_gains[1] = quantize(pid_gains[1], ki_lo, ki_hi)
-    kd_step = 0.001 if kd_hi <= 0.02 else 0.01
-    pid_gains[2] = quantize(pid_gains[2], max(kd_lo, 0.0), kd_hi, step=kd_step)
+    kd_step = 0.001 if kd_hi <= 0.03 else 0.01
+    pid_gains[2] = quantize(pid_gains[2], max(kd_lo, 0.0), kd_hi, step=kd_step, decimals=3)
     
     return pid_gains
 

@@ -283,6 +283,7 @@ class RewardBreakdownLogger:
         force=True이면 언제든 실행, False이면 CSV만 저장 (PNG 생성 안 함).
         episode_rewards: 에피소드별 보상 리스트 (선택사항)
         """
+        os.makedirs(self.log_dir, exist_ok=True)
         # 데이터가 없으면 실행하지 않음
         if not self.rows:
             return
@@ -529,4 +530,3 @@ class RewardBreakdownLogger:
             print(f"   ⚠️ 보상 구성 요소 그래프 생성 실패: {e}")
             import traceback
             traceback.print_exc()
-

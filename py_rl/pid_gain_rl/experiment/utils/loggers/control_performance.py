@@ -391,8 +391,6 @@ class ControlPerformanceLogger:
             "total_variation",
             # 안정성 지표 (2개)
             "band_ratio",
-            "success_rate",
-            "success_rate",
             "error_variance",
         ]
 
@@ -498,7 +496,6 @@ class ControlPerformanceLogger:
             "input_rms",
             "total_variation",
             "band_ratio",
-            "success_rate",
             "error_variance",
         ]
 
@@ -926,4 +923,3 @@ class ControlPerformanceLogger:
 # =========================
 # Learning Done Logger
 # =========================
-
