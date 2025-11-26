@@ -377,7 +377,8 @@ class PIDGainEnvironment:
         if Constants.WARM_START_ENABLED and len(self.agent.replay) == 0:
             self.agent.warm_start_buffer()
 
-        for ep in range(episodes):
+        ep = 0
+        while ep < episodes:
             # 에피소드별 리셋 없음 (연속 모니터링)
 
             self.episode_count = ep
@@ -560,6 +561,13 @@ class PIDGainEnvironment:
             dt = 0.001  # 1ms
             t_next = None
 
+            episode_invalid = False  # 통신 이상 등으로 무효 처리 플래그
+            repeat_count = 0
+            prev_force_rounded = None
+            monitor_window_s = 0.5
+            monitor_start_s = 0.05  # 활성화 후 50ms 경과 후부터 검사
+            repeat_threshold = 20  # 소수점 6째 자리 동일 force 20개 연속(≈20ms)이면 오류
+
             data_valid = True  # 목표 미도달 등으로 데이터 무효 시 False
             while True:
                 now = time.perf_counter()
@@ -614,6 +622,23 @@ class PIDGainEnvironment:
                 if activation_seen and not sander_active:
                     print("⚠️ sander_active 하강 감지 - 데이터 수집 종료")
                     break
+
+                # 통신 이상 감지 (초기 0.5초 동안 소수점 6째 자리 동일 force 10회 연속)
+                if activation_time is not None:
+                    elapsed = now - activation_time
+                    if monitor_start_s <= elapsed <= monitor_window_s:
+                        force_r = round(float(state[0]), 6)
+                        if (
+                            prev_force_rounded is not None
+                            and force_r == prev_force_rounded
+                        ):
+                            repeat_count += 1
+                            if repeat_count >= repeat_threshold:
+                                episode_invalid = True
+                                break
+                        else:
+                            repeat_count = 0
+                        prev_force_rounded = force_r
 
                 # 워밍업 구간 동안에는 기록하지 않음
                 if effective_start_time is None:
@@ -771,6 +796,51 @@ class PIDGainEnvironment:
 
             if duration_start_time is None:
                 duration_start_time = wall_start_time
+
+            if episode_invalid:
+                msg = f"Ep {ep+1}: 통신 이상(동일 force 반복) 감지 → 에피소드 무효, 재시작"
+                print(f"⚠️ {msg}")
+                self._log("WARNING", msg)
+                self._run_log(f"[Ep {ep+1}] invalid (comm repeat)")
+                # 다음 시도에서 같은 PID로 재시작
+                self.pid_gains_next = pid_gains.copy()
+                # 로봇 초기화 시퀀스 트리거 (일반 에피소드 종료와 동일 플래그 사용)
+                try:
+                    self.comm.send_pid_once(
+                        self.pid_gains_next[0],
+                        self.pid_gains_next[1],
+                        self.pid_gains_next[2],
+                        timing_accurate=True,
+                        episode_done=True,
+                        learning_done=False,
+                    )
+                except Exception:
+                    pass
+                # 버퍼 정리
+                self.episode_force_data.clear()
+                self.episode_state_history.clear()
+                self.episode_pi_output_data.clear()
+                # 로봇 리셋 대기 (2초) - 모니터 업데이트만 수행
+                wait_start = time.perf_counter()
+                while (time.perf_counter() - wait_start) < 2.0:
+                    state, _ = self.comm.get_latest_state()
+                    if state is not None:
+                        now = time.perf_counter()
+                        if now - last_monitor_sent >= 0.1:  # 10 Hz
+                            t_global = now - training_start_time
+                            monitor.post_force(
+                                t_global,
+                                float(abs(state[0])),
+                                float(abs(self.cfg["TARGET_FORCE"])),
+                            )
+                            monitor.post_pi_output(
+                                t_global,
+                                float(state[5]),
+                            )
+                            last_monitor_sent = now
+                    time.sleep(0.01)
+                # 에피소드 번호 유지하고 다시 시도
+                continue
 
             print(
                 f"📈 [수집] 완료: {data_count}개 데이터 (목표: {int(self.cfg['EPISODE_SECONDS'] * 1000)})"
@@ -1174,6 +1244,8 @@ class PIDGainEnvironment:
                             )
                             last_monitor_sent = now
                     time.sleep(0.01)  # CPU 부하 방지
+
+            ep += 1
 
         # 12. 최종 결과
         self._log("INFO", "\n🎯 PID Gain 최적화 완료!")
