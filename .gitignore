@@ -435,3 +435,6 @@ py_rl/pid_gain_rl/saved_agents
 
 # 통신 무시
 py_rl/pid_gain_rl/tele
+
+# c++ 코드 무시
+py_rl/pid_gain_rl/experiment/C++
