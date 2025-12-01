@@ -13,7 +13,7 @@ class Config:
     """강화학습 설정을 관리하는 데이터클래스"""
     # 신경망 설정
     state_dim: int = Constants.STATE_DIM  # 6차원 상태 공간 (힘/오차/PI 출력)
-    action_dim: int = 3
+    action_dim: int = 4
     hidden_dim: int = Constants.DEFAULT_HIDDEN_DIM
     lr: float = Constants.DEFAULT_LR
     lr_actor: float = Constants.DEFAULT_LR_ACTOR
@@ -24,6 +24,7 @@ class Config:
     
     # PID 설정
     pid_range: Dict[str, Tuple[float, float]] = field(default_factory=lambda: Constants.DEFAULT_PID_RANGE)
+    precharge_range: Tuple[float, float] = field(default_factory=lambda: Constants.DEFAULT_PRECHARGE_RANGE)
     
     # 에피소드 설정
     episode_seconds: float = Constants.DEFAULT_EPISODE_SECONDS
@@ -62,6 +63,7 @@ class Config:
             "STATE_DIM": self.state_dim,
             "ACTION_DIM": self.action_dim,
             "HIDDEN": self.hidden_dim,
+            "PRECHARGE_RANGE": self.precharge_range,
             "LR": self.lr,
             "LR_ACTOR": self.lr_actor,
             "LR_CRITIC": self.lr_critic,
@@ -95,6 +97,7 @@ class Config:
             state_dim=config_dict.get("STATE_DIM", Constants.STATE_DIM),
             action_dim=config_dict.get("ACTION_DIM", 3),
             hidden_dim=config_dict.get("HIDDEN", Constants.DEFAULT_HIDDEN_DIM),
+            precharge_range=config_dict.get("PRECHARGE_RANGE", Constants.DEFAULT_PRECHARGE_RANGE),
             lr=config_dict.get("LR", Constants.DEFAULT_LR),
             lr_actor=config_dict.get("LR_ACTOR", Constants.DEFAULT_LR_ACTOR),
             lr_critic=config_dict.get("LR_CRITIC", Constants.DEFAULT_LR_CRITIC),
@@ -168,4 +171,3 @@ def change_episode_length(config: Config, new_length_seconds: float) -> Config:
     print(f"🔄 에피소드 길이 변경: {new_length_seconds}초")
     print(f"📊 목표 데이터 개수: {int(new_length_seconds * config.recv_freq_hz)}개")
     return config
-

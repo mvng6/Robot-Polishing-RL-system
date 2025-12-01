@@ -6,6 +6,7 @@ import struct
 import threading
 import time
 import numpy as np
+from collections import deque
 from ..utils.loggers.base_logger import AppLogger
 
 class PIDGainCommunicator:
@@ -27,8 +28,12 @@ class PIDGainCommunicator:
         self.conn = None
         self.connected = False
 
-        self.CPP_TO_PY_PACKET_FORMAT = ">HffffffBH"
-        self.CPP_TO_PY_PACKET_SIZE = 29
+        # SOF, current_force, target_force, error, edot, eint, pi_output, sander_active,
+        # precharge_applied, J3, prep_flag, checksum
+        self.CPP_TO_PY_PACKET_FORMAT = ">HffffffBffBH"
+        self.CPP_TO_PY_PACKET_SIZE = struct.calcsize(
+            self.CPP_TO_PY_PACKET_FORMAT
+        )
         self.CPP_TO_PY_SOF = 0xAAAA
         # self.PY_TO_CPP_PACKET_FORMAT = ">HfBBBH"  # SOF, rl_residual,
         # timing_accurate, episode_done, learning_done, checksum (미사용)
@@ -38,11 +43,11 @@ class PIDGainCommunicator:
         # self.PY_TO_CPP_SOF = 0xBBBB  # (미사용)
 
         # PID gain 전송용 패킷 포맷
-        # SOF, Kp, Ki, Kd, timing_accurate, episode_done, learning_done, checksum
-        self.PID_PACKET_FORMAT = ">HfffBBBH"
-        # SOF(2) + Kp(4) + Ki(4) + Kd(4) + timing(1) + ep_done(1) +
-        # learn_done(1) + checksum(2) = 19 bytes
-        self.PID_PACKET_SIZE = 19
+        # SOF, precharge, Kp, Ki, Kd, timing_accurate, episode_done, learning_done, checksum
+        self.PID_PACKET_FORMAT = ">HffffBBBH"
+        # SOF(2) + precharge(4) + Kp(4) + Ki(4) + Kd(4) + timing(1) + ep_done(1) +
+        # learn_done(1) + checksum(2) = 23 bytes
+        self.PID_PACKET_SIZE = 23
         self.PID_SOF = 0xBBBB  # 잔차학습과 동일한 SOF 사용
         self.latest_state = None
         self.latest_sander_active = False
@@ -56,6 +61,15 @@ class PIDGainCommunicator:
         self.last_packet_time = None
         self.consecutive_failures = 0
         self.old_data_warning_logged = False  # 오래된 데이터 경고 중복 방지
+        # 준비 구간 힘 평균 계산용
+        self.prep_force_deque = deque(
+            maxlen=int(3.0 / self.cfg["RECV_INTERVAL_SEC"])
+            if self.cfg and "RECV_INTERVAL_SEC" in self.cfg and self.cfg["RECV_INTERVAL_SEC"] > 0
+            else 3000
+        )
+        self.last_prep_force_avg = 0.0
+        self.prev_sander_active = False
+        self.prev_prep_flag = False
 
     def _log(self, level, message):
         AppLogger.log(level, message)
@@ -113,14 +127,25 @@ class PIDGainCommunicator:
                 try:
                     self.conn.settimeout(self.recv_loop_timeout)
                     data = self._recv_exact(self.CPP_TO_PY_PACKET_SIZE)
-                    if data:
-                        state, sander_active = self._process_packet(data)
-                        if state is not None:
-                            with self.state_lock:
-                                self.latest_state = state
-                                self.latest_sander_active = sander_active
-                                self.last_packet_time = time.perf_counter()
-                            self.consecutive_failures = 0
+                    if data is None:
+                        self.consecutive_failures += 1
+                        self._log(
+                            "WARNING",
+                            f"수신 데이터 없음/연결 종료 감지 "
+                            f"({self.consecutive_failures}회)",
+                        )
+                        if self.consecutive_failures >= 5:
+                            self._log("ERROR", "연속 수신 실패로 수신 루프 중단")
+                            break
+                        time.sleep(self.cfg["RECV_INTERVAL_SEC"])
+                        continue
+                    state, sander_active = self._process_packet(data)
+                    if state is not None:
+                        with self.state_lock:
+                            self.latest_state = state
+                            self.latest_sander_active = sander_active
+                            self.last_packet_time = time.perf_counter()
+                        self.consecutive_failures = 0
                 except socket.timeout:
                     pass
                 except Exception as e:
@@ -164,8 +189,11 @@ class PIDGainCommunicator:
                     force_error_int,
                     pi_output,
                     sander_active,
+                    precharge_applied,
+                    j3_prep,
+                    prep_flag,
                     received_checksum,
-                ) = struct.unpack(">HffffffBH", data)
+                ) = struct.unpack(self.CPP_TO_PY_PACKET_FORMAT, data)
             except struct.error as e:
                 self._log("ERROR", f"패킷 언팩 실패: {e}")
                 return None, False
@@ -190,10 +218,40 @@ class PIDGainCommunicator:
                     force_error_dot,  # 3
                     force_error_int,  # 4
                     pi_output,  # 5
+                    precharge_applied,  # 6
+                    j3_prep,  # 7
+                    0.0,  # prep_force_avg placeholder (8)
+                    prep_flag,  # 9 (uint8 -> float)
                 ],
                 dtype=np.float32,
             )
             sander_active = bool(sander_active)
+            prep_flag_bool = bool(prep_flag)
+
+            # 준비 구간 힘 평균 계산 (prep_flag ON 동안 누적, OFF 또는 상승 시 고정)
+            if prep_flag_bool and not sander_active:
+                self.prep_force_deque.append(current_force)
+                if len(self.prep_force_deque) > 0:
+                    self.last_prep_force_avg = float(
+                        sum(self.prep_force_deque) / len(self.prep_force_deque)
+                    )
+                state[8] = self.last_prep_force_avg
+            else:
+                if self.prev_prep_flag and not prep_flag_bool:
+                    # 준비 플래그가 꺼지면 평균 고정
+                    state[8] = self.last_prep_force_avg
+                elif not self.prev_sander_active and sander_active:
+                    # sander_active 상승 에지에서 평균 고정
+                    state[8] = self.last_prep_force_avg
+                else:
+                    # 이후에는 고정값 유지
+                    state[8] = self.last_prep_force_avg
+
+            # 준비 플래그 상태를 상태 벡터에 반영 (0/1)
+            state[9] = 1.0 if prep_flag_bool else 0.0
+
+            self.prev_sander_active = sander_active
+            self.prev_prep_flag = prep_flag_bool
 
             with self.stats_lock:
                 self.packets_received += 1
@@ -256,6 +314,7 @@ class PIDGainCommunicator:
         kp,
         ki,
         kd,
+        precharge=0.0,
         timing_accurate=True,
         episode_done=False,
         learning_done=False,
@@ -271,9 +330,12 @@ class PIDGainCommunicator:
             learning_done: 학습 종료 플래그
         """
         try:
+            # 프리차지 값은 소수점 3째자리에서 고정 (통신/로그 일관성)
+            precharge = round(float(precharge), 3)
             payload = struct.pack(
-                ">HfffBBB",
+                ">HffffBBB",
                 self.PID_SOF,
+                precharge,
                 float(kp),
                 float(ki),
                 float(kd),
@@ -285,6 +347,7 @@ class PIDGainCommunicator:
             final_packet = struct.pack(
                 self.PID_PACKET_FORMAT,
                 self.PID_SOF,
+                float(precharge),
                 float(kp),
                 float(ki),
                 float(kd),
@@ -298,7 +361,8 @@ class PIDGainCommunicator:
                 self.packets_sent += 1
             self._log(
                 "INFO",
-                f"📡 PID gain 전송: Kp={kp:.2f}, Ki={ki:.2f}, Kd={kd:.2f}",
+                f"📡 PID/Precharge 전송: precharge={precharge:.3f}MPa, "
+                f"Kp={kp:.2f}, Ki={ki:.2f}, Kd={kd:.2f}",
             )
             return True
         except Exception as e:

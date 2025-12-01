@@ -17,7 +17,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from collections import deque
 from ..config.constants import Constants
-from ..utils.utils.math_utils import scale_action_to_pid
+from ..utils.utils.math_utils import scale_action_to_control
 
 class Actor(nn.Module):
     def __init__(
@@ -248,7 +248,9 @@ class PIDGainSACAgent:
                 action, log_prob = self.actor.sample(state, std_scale=self.std_scale)
 
         action_np = action.cpu().numpy().flatten()
-        pid_gains = scale_action_to_pid(action_np, self.cfg["PID_RANGE"])
+        precharge, pid_gains = scale_action_to_control(
+            action_np, self.cfg["PID_RANGE"], self.cfg["PRECHARGE_RANGE"]
+        )
         
         # 🆕 탐색 메트릭 추적 (최근 액션 저장)
         if not evaluate:
@@ -258,22 +260,24 @@ class PIDGainSACAgent:
 
         if log_prob is not None:
             log_prob = log_prob.cpu().numpy()
-            return pid_gains, log_prob
+            return pid_gains, precharge, log_prob
         else:
-            return pid_gains, None
+            return pid_gains, precharge, None
 
     def select_action_random(self):
-        """안전 위반 시 사용할 랜덤 PID gain 선택"""
-        action_np = np.random.uniform(-1.0, 1.0, size=3)
-        pid_gains = scale_action_to_pid(action_np, self.cfg["PID_RANGE"])
-        return pid_gains
+        """안전 위반 시 사용할 랜덤 PID gain/프리차지 선택"""
+        action_np = np.random.uniform(-1.0, 1.0, size=4)
+        precharge, pid_gains = scale_action_to_control(
+            action_np, self.cfg["PID_RANGE"], self.cfg["PRECHARGE_RANGE"]
+        )
+        return pid_gains, precharge
 
     def store_transition(self, state, action, reward, next_state, done):
         """
-        수정: 세그먼트별 transition 저장
+        세그먼트별 transition 저장
         Args:
-            state: 현재 상태 (STATE_DIM 차원 = 6)
-            action: PID gain 액션 [Kp, Ki, Kd]
+            state: 현재 상태 (STATE_DIM 차원)
+            action: 액션 [precharge, Kp, Ki, Kd]
             reward: 세그먼트 보상
             next_state: 다음 상태 (STATE_DIM 차원)
             done: 세그먼트 종료 여부
@@ -296,7 +300,7 @@ class PIDGainSACAgent:
             reward = np.clip(reward, reward_min, reward_max)
             print(f"{reward:.2f}")
         
-        norm_action = self._normalize_pid_action(action)
+        norm_action = self._normalize_action(action)
         
         if np.isnan(norm_action).any() or np.isinf(norm_action).any():
             print(f"❌ [오류] 정규화된 액션에 NaN/Inf 검출!")
@@ -304,9 +308,16 @@ class PIDGainSACAgent:
         
         self.replay.push(state_arr, norm_action, reward, next_state_arr, done)
 
-    def _normalize_pid_action(self, pid_action):
-        """PID gain을 [-1, 1] 범위로 정규화"""
+    def _normalize_action(self, action_vec):
+        """[precharge, Kp, Ki, Kd]를 [-1, 1] 범위로 정규화"""
         pid_range = self.cfg["PID_RANGE"]
+        precharge_range = self.cfg["PRECHARGE_RANGE"]
+
+        def normalize_precharge(v, lo, hi):
+            if abs(hi - lo) < 1e-9:
+                return 0.0
+            v = np.clip(v, lo, hi)
+            return 2.0 * (v - lo) / (hi - lo) - 1.0
 
         def normalize_linear(v, lo, hi):
             if abs(hi - lo) < 1e-9:
@@ -336,9 +347,10 @@ class PIDGainSACAgent:
 
         return np.array(
             [
-                normalize_linear(pid_action[0], *pid_range["Kp"]),
-                normalize_linear(pid_action[1], *pid_range["Ki"]),
-                normalize_kd(pid_action[2], *pid_range["Kd"]),
+                normalize_precharge(action_vec[0], *precharge_range),
+                normalize_linear(action_vec[1], *pid_range["Kp"]),
+                normalize_linear(action_vec[2], *pid_range["Ki"]),
+                normalize_kd(action_vec[3], *pid_range["Kd"]),
             ],
             dtype=np.float32,
         )
@@ -484,7 +496,7 @@ class PIDGainSACAgent:
             dummy_state = np.zeros(self.cfg["STATE_DIM"], dtype=np.float32)
             dummy_next_state = np.zeros(self.cfg["STATE_DIM"], dtype=np.float32)
             
-            # PID를 액션으로 변환 (scale_action_to_pid의 역함수)
+            # PID를 액션으로 변환 (역스케일)
             kp_norm = 2.0 * (kp - pid_range["Kp"][0]) / (pid_range["Kp"][1] - pid_range["Kp"][0]) - 1.0
             ki_norm = 2.0 * (ki - pid_range["Ki"][0]) / (pid_range["Ki"][1] - pid_range["Ki"][0]) - 1.0
             linear_kd = (kd_lo <= 0.0) or (pid_range["Kd"][1] <= 0.03)
@@ -496,7 +508,7 @@ class PIDGainSACAgent:
                 kd_log_max = np.log10(kd_hi_safe)
                 kd_norm = 2.0 * (kd_log - kd_log_min) / (kd_log_max - kd_log_min) - 1.0
             
-            dummy_action = np.array([kp_norm, ki_norm, kd_norm], dtype=np.float32)
+            dummy_action = np.array([0.0, kp_norm, ki_norm, kd_norm], dtype=np.float32)  # precharge 채널은 0으로
             dummy_reward = 0.0
             dummy_done = False
             
@@ -517,14 +529,16 @@ class PIDGainSACAgent:
         
         # Action std/range 비율 계산
         action_std = np.std(recent_actions, axis=0)
-        action_range = np.array([2.0, 2.0, 2.0])  # [-1, 1] 범위
+        action_range = np.array([2.0, 2.0, 2.0, 2.0])  # [-1, 1] 범위
         std_ratio_pct = (action_std / action_range * 100).mean()  # 평균
         
         # Kd decade 커버리지
         # PID로 변환하여 Kd 값 추출
         kd_values = []
         for action in recent_actions:
-            pid_gains = scale_action_to_pid(action, pid_range)
+            _, pid_gains = scale_action_to_control(
+                action, pid_range, self.cfg["PRECHARGE_RANGE"]
+            )
             kd_values.append(pid_gains[2])
         
         kd_log = np.log10(np.array(kd_values))

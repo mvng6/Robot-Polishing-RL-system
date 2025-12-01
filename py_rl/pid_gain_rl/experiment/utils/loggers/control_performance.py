@@ -392,6 +392,8 @@ class ControlPerformanceLogger:
             # 안정성 지표 (2개)
             "band_ratio",
             "error_variance",
+            # 추가: success_rate PNG 생성
+            "success_rate",
         ]
 
         for metric_name in all_metrics:
@@ -479,13 +481,13 @@ class ControlPerformanceLogger:
         # 폰트 설정 재적용
         self._setup_fonts()
 
-        # 3x4 서브플롯 생성 (10개 지표)
+        # 3x4 서브플롯 생성 (success_rate 포함 11개 지표)
         fig, axes = plt.subplots(3, 4, figsize=(20, 12))
         fig.suptitle(
             "PID Gain Optimization Performance Dashboard", fontweight="bold", fontsize=20
         )
 
-        # 논문용 10개 핵심 지표만
+        # 논문용 10개 핵심 지표 + success_rate
         key_metrics = [
             "rmse",
             "steady_state_error",
@@ -497,6 +499,7 @@ class ControlPerformanceLogger:
             "total_variation",
             "band_ratio",
             "error_variance",
+            "success_rate",
         ]
 
         for i, metric_name in enumerate(key_metrics):

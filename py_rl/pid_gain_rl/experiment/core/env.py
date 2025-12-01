@@ -87,6 +87,7 @@ class PIDGainEnvironment:
         self.pid_gains_next = (
             None  # 다음 에피소드에 실제로 적용할 PID (미리 전송한 값)
         )
+        self.precharge_next = None  # 다음 에피소드에 사용할 프리차지 압력
         self.historical_errors = []  # 이전 에피소드들의 에러 통계
         self.episode_count = 0  # 에피소드 카운터
 
@@ -402,6 +403,9 @@ class PIDGainEnvironment:
                         f"std_scale={self.agent.std_scale:.2f}"
                     )
             print(f"\n{'='*60}\n에피소드 {ep+1}/{episodes}")
+            precharge_range = self.cfg.get("PRECHARGE_RANGE", Constants.DEFAULT_PRECHARGE_RANGE)
+            precharge_mid = float((precharge_range[0] + precharge_range[1]) * 0.5)
+
             if ep > 0 and self.previous_pid_gains is not None:
                 # 이전 에피소드 정보를 활용한 상태 추정
 
@@ -424,12 +428,13 @@ class PIDGainEnvironment:
             if ep == 0:
                 # 첫 에피소드: 로봇제어PC 자체 PID 사용 (P=40, I=50, D=0)
                 pid_gains = np.array([40.0, 50.0, 0.0], dtype=np.float32)
+                current_precharge = precharge_mid
                 print(
-                    f"🎯 [에피소드 1] 로봇제어PC 자체 PID 사용: Kp={pid_gains[0]:.2f}, Ki={pid_gains[1]:.2f}, Kd={pid_gains[2]:.3f}"
+                    f"🎯 [에피소드 1] 로봇제어PC 자체 PID 사용: Kp={pid_gains[0]:.2f}, Ki={pid_gains[1]:.2f}, Kd={pid_gains[2]:.3f}, precharge={current_precharge:.3f}MPa"
                 )
                 self._log(
                     "INFO",
-                    f"🎯 에피소드 1 기준 PID: Kp={pid_gains[0]:.2f}, Ki={pid_gains[1]:.2f}, Kd={pid_gains[2]:.3f}",
+                    f"🎯 에피소드 1 기준 PID: Kp={pid_gains[0]:.2f}, Ki={pid_gains[1]:.2f}, Kd={pid_gains[2]:.3f}, precharge={current_precharge:.3f}MPa",
                 )
             else:
                 # 2번째 에피소드부터: 이전 에피소드 종료 시 전송한 PID 사용
@@ -437,8 +442,11 @@ class PIDGainEnvironment:
                     self.pid_gains_next is not None
                 ), f"에피소드 {ep+1}: 이전 에피소드에서 next PID가 설정되지 않았습니다!"
                 pid_gains = self.pid_gains_next.copy()
+                current_precharge = (
+                    self.precharge_next if self.precharge_next is not None else precharge_mid
+                )
                 print(
-                    f"🤖 [에피소드 {ep+1}] PID: Kp={pid_gains[0]:.2f}, Ki={pid_gains[1]:.2f}, Kd={pid_gains[2]:.3f}"
+                    f"🤖 [에피소드 {ep+1}] PID: Kp={pid_gains[0]:.2f}, Ki={pid_gains[1]:.2f}, Kd={pid_gains[2]:.3f}, precharge={current_precharge:.3f}MPa"
                 )
 
                 # ⭐ 에피소드 시작 신호: episode_done=False 전송 (플래그 리셋)
@@ -447,6 +455,7 @@ class PIDGainEnvironment:
                     pid_gains[0],
                     pid_gains[1],
                     pid_gains[2],
+                    current_precharge,
                     timing_accurate=True,
                     episode_done=False,
                     learning_done=False,
@@ -664,9 +673,10 @@ class PIDGainEnvironment:
                     self._log("INFO", f"안전 위반 패널티: {safety_violation_reward:.2f}")
                     
                     # 🎲 다음 에피소드용 랜덤 PID 생성 (안전한 범위에서 재시작)
-                    next_pid_for_reset = self.agent.select_action_random()
-                    print(f"🎲 다음 에피소드용 랜덤 PID 생성: Kp={next_pid_for_reset[0]:.2f}, Ki={next_pid_for_reset[1]:.2f}, Kd={next_pid_for_reset[2]:.2f}")
+                    next_pid_for_reset, next_precharge = self.agent.select_action_random()
+                    print(f"🎲 다음 에피소드용 랜덤 PID 생성: Kp={next_pid_for_reset[0]:.2f}, Ki={next_pid_for_reset[1]:.2f}, Kd={next_pid_for_reset[2]:.2f}, precharge={next_precharge:.3f}MPa")
                     self.pid_gains_next = next_pid_for_reset.copy()  # 저장
+                    self.precharge_next = next_precharge
                     
                     # 로봇 초기화 동작 신호 전송 (다음 에피소드 PID와 함께)
                     print("🔄 로봇 초기화 동작 시작 (episode_done=True + 다음 PID 전송)...")
@@ -674,6 +684,7 @@ class PIDGainEnvironment:
                         next_pid_for_reset[0],  # ✅ 다음 에피소드 PID 전송
                         next_pid_for_reset[1],
                         next_pid_for_reset[2],
+                        next_precharge,
                         timing_accurate=True,  # ✅ 정상 종료와 동일한 플래그로 전송
                         episode_done=True,  # 에피소드 종료 신호
                         learning_done=False,
@@ -804,12 +815,14 @@ class PIDGainEnvironment:
                 self._run_log(f"[Ep {ep+1}] invalid (comm repeat)")
                 # 다음 시도에서 같은 PID로 재시작
                 self.pid_gains_next = pid_gains.copy()
+                self.precharge_next = current_precharge
                 # 로봇 초기화 시퀀스 트리거 (일반 에피소드 종료와 동일 플래그 사용)
                 try:
                     self.comm.send_pid_once(
                         self.pid_gains_next[0],
                         self.pid_gains_next[1],
                         self.pid_gains_next[2],
+                        self.precharge_next,
                         timing_accurate=True,
                         episode_done=True,
                         learning_done=False,
@@ -866,7 +879,7 @@ class PIDGainEnvironment:
 
                 self.agent.store_transition(
                     initial_state_violation,
-                    pid_gains,
+                    np.array([current_precharge, *pid_gains], dtype=np.float32),
                     bad_reward,
                     final_state_violation,
                     True,
@@ -944,21 +957,17 @@ class PIDGainEnvironment:
             
             # 리플레이 버퍼에 세그먼트별 저장
             for i, seg in enumerate(segments_data):
-                if i == 0:
-                    current_state = np.array(actual_initial_state, dtype=np.float32)
-                else:
-                    current_state = segments_data[i-1]["state"]
-                
+                current_state = seg["state"]
                 if i < num_segments - 1:
                     next_state = segments_data[i + 1]["state"]
                     done = False
                 else:
                     next_state = seg["state"]
                     done = True
-                
+
                 self.agent.store_transition(
                     current_state,
-                    pid_gains,
+                    np.array([current_precharge, *pid_gains], dtype=np.float32),
                     seg["reward"],
                     next_state,
                     done,
@@ -1162,37 +1171,39 @@ class PIDGainEnvironment:
                     self.episode_history,
                     self.cfg["RECV_INTERVAL_SEC"],
                 )
-                # 다음 에피소드 PID 게인 선택
+                # 다음 에피소드 PID/프리차지 게인 선택
                 forced_explore = ep < Constants.FORCED_RANDOM_EPISODES
                 use_random = False  # 100ep 이후엔 ε-greedy 비활성화
                 if ep < Constants.FORCED_RANDOM_EPISODES:
                     use_random = ((ep + 1) % 10 == 0) and (random.random() < 0.05)
                 if forced_explore:
-                    next_pid_gains = self.agent.select_action_random()
+                    next_pid_gains, next_precharge = self.agent.select_action_random()
                     self._log(
                         "INFO",
                         f"🎲 초기 강제 탐색: 에피소드 {ep+1}까지 랜덤 PID 사용"
                     )
                 elif use_random:
-                    next_pid_gains = self.agent.select_action_random()
+                    next_pid_gains, next_precharge = self.agent.select_action_random()
                     self._log(
                         "INFO",
                         "🎲 ε-greedy 적용: 랜덤 PID 선택 (10-주기, p=0.05)",
                     )
                 else:
-                    next_pid_gains, _ = self.agent.select_action(
+                    next_pid_gains, next_precharge, _ = self.agent.select_action(
                         next_initial_state, evaluate=False
                     )
                 self.pid_gains_next = (
                     next_pid_gains.copy()
                 )  # ✅ 저장! (다음 에피소드에서 사용)
+                self.precharge_next = next_precharge
                 print(
-                    f"🎯 다음 에피소드 PID: Kp={next_pid_gains[0]:.2f}, Ki={next_pid_gains[1]:.2f}, Kd={next_pid_gains[2]:.3f}"
+                    f"🎯 다음 에피소드 PID: Kp={next_pid_gains[0]:.2f}, Ki={next_pid_gains[1]:.2f}, Kd={next_pid_gains[2]:.3f}, precharge={next_precharge:.3f}MPa"
                 )
             else:
                 # 마지막 에피소드인 경우 현재 PID 사용
                 next_pid_gains = pid_gains
                 self.pid_gains_next = next_pid_gains.copy()
+                self.precharge_next = current_precharge
 
             # 13. 에피소드 완료 신호 전송 (다음 에피소드 PID 게인과 함께)
             print(f"📤 [전송] 에피소드 {ep+1} 완료 신호 + 다음 PID 전송 중...")
@@ -1201,6 +1212,7 @@ class PIDGainEnvironment:
                 self.pid_gains_next[0],
                 self.pid_gains_next[1],
                 self.pid_gains_next[2],
+                self.precharge_next if self.precharge_next is not None else current_precharge,
                 timing_accurate=True,
                 episode_done=True,
                 learning_done=False,
@@ -1313,7 +1325,7 @@ class PIDGainEnvironment:
         # 15. 학습 완료 신호 전송
         print(f"📤 [전송] 모든 에피소드 완료 - 학습 종료 신호 전송 중...")
         learning_done_success = self.comm.send_pid_once(
-            0, 0, 0, True, False, True
+            0, 0, 0, 0.0, True, False, True
         )  # learning_done=True
         if learning_done_success:
             print(f"✅ [전송] 학습 종료 신호 전송 성공")

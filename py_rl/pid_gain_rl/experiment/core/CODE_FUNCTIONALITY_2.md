@@ -1,263 +1,78 @@
 # 📋 코드 기능 상세 분석 - Part 2: 핵심 RL 모듈
 
-## 📁 모듈 목록
+## 📁 모듈 목록 (experiment/core)
+1. `agent.py` - SAC 에이전트 (Actor/Critic/ReplayBuffer)
+2. `env.py` - PID Gain RL 환경 및 학습 루프
+3. `comm.py` - 로봇/센서 TCP 래퍼
+4. `monitor.py` - 실시간 모니터 GUI 프로세스
 
-1. `agent.py` - SAC 에이전트 (Actor, Critic, ReplayBuffer)
-2. `env.py` - PID Gain 강화학습 환경
-3. `comm.py` - TCP/IP 통신 래퍼
-4. `monitor.py` - 실시간 모니터링 GUI
+---
+## 🆕 최근 주요 포인트
+- 상태 10차원(힘/오차 6 + 준비 컨텍스트 4), 액션 4차원(precharge + PID).
+- 세그먼트 학습: 1 에피소드 = 5개 세그먼트, 세그먼트별 보상/transition 저장.
+- 탐색 강화: log_std 상한 -0.3, std annealing(1.2→0.5, ep 0~180), target entropy 동적 전환(-1.2→-0.9, 120ep).
+- 안전 로직: 힘 한계(±100N) 위반 시 패널티 -1, 랜덤 PID 전송 후 에피소드 스킵.
 
 ---
 
 ## 1. `agent.py` - SAC 에이전트
+**경로**: `py_rl/pid_gain_rl/experiment/core/agent.py`  
+**역할**: SAC 네트워크/버퍼/탐색 관리, LR·엔트로피 스케줄, warm-start
 
-**파일 경로**: `py_rl/pid_gain_rl/agent.py`  
-**줄 수**: ~565줄  
-**역할**: Soft Actor-Critic (SAC) 알고리즘 구현
-
-### 주요 클래스
-
-#### 1.1 `Actor` 클래스 (nn.Module)
-
-**역할**: 정책 네트워크 (Policy Network)
-
-**구조**:
-- 입력: `state_dim` 차원 (6차원)
-- 은닉층: 2층 MLP (128-128)
-- 출력:
-  - `mean`: 액션 평균 (3차원: Kp, Ki, Kd)
-  - `log_std`: 액션 로그 표준편차 (3차원)
-
-**주요 메서드**:
-
-1. **`__init__()`**
-   - `log_std_min=-2.5`, `log_std_max=-0.3` 설정
-   - 가중치 초기화: ReLU 친화적인 Kaiming Uniform 적용 (기본값으로 회귀)
-
-2. **`forward(state)`**
-   - 입력: 상태 벡터
-   - 출력: `mean`, `log_std`
-   - `mean`: MLP 출력 그대로 사용 (tanh에서 자연스럽게 [-1, 1] 제한)
-   - `log_std`: [log_std_min, log_std_max]로 클리핑
-
-3. **`sample(state, std_scale=1.0)`**
-   - **표준편차 스케일링 지원** (annealing용)
-   - `std_scale`: 0.3~1.0 범위
-   - 정규분포에서 샘플링 → tanh 적용
-   - 로그 확률 계산 (reparameterization trick)
-
-#### 1.2 `Critic` 클래스 (nn.Module)
-
-**역할**: Q-값 네트워크 (Twin Q-Networks)
-
-- **구조**:
-- 입력: `state_dim + action_dim` (6 + 3 = 9차원)
-- 은닉층: 2층 MLP (128-128)
-- 출력: Q1, Q2 (각각 1차원)
-
-**주요 메서드**:
-
-1. **`forward(state, action)`**
-   - 상태와 액션을 concat하여 입력
-   - Q1, Q2 반환 (Twin Q-Networks)
-   - 모든 Linear 층은 Kaiming Uniform으로 초기화 (ReLU 친화적)
-
-#### 1.3 `ReplayBuffer` 클래스
-
-**역할**: 경험 리플레이 버퍼
-
-**주요 메서드**:
-
-1. **`__init__(capacity=None)`**
-   - `deque` 사용 (최대 크기 제한)
-   - 기본 크기: `DEFAULT_REPLAY_BUFFER_SIZE` (10000)
-
-2. **`push(state, action, reward, next_state, done)`**
-   - transition 저장
-
-3. **`sample(batch_size)`**
-   - 랜덤 샘플링
-   - 배치 형태로 반환 (numpy array)
-
-#### 1.4 `PIDGainSACAgent` 클래스
-
-**역할**: SAC 알고리즘 통합 에이전트
-
-**주요 속성**:
-
-1. **네트워크**:
-   - `actor`: Actor 네트워크
-   - `critic`: Critic 네트워크 (Q1, Q2)
-   - `critic_target`: Target Critic 네트워크
-
-2. **옵티마이저**:
-   - `actor_opt`: Actor 옵티마이저 (LR: 1e-4)
-   - `critic_opt`: Critic 옵티마이저 (LR: 2e-4)
-   - `alpha_opt`: Entropy 계수 옵티마이저 (자동 튜닝 시)
-
-3. **하이퍼파라미터**:
-   - `gamma`: 할인율 (0.98)
-   - `tau`: Soft update 계수 (0.01)
-   - `alpha`: Entropy 계수 (초기: 0.1, 자동 튜닝)
-
-4. **탐색 관련**:
-   - `std_scale`: 표준편차 스케일 (annealing용, 1.0 → 0.5)
-   - `target_entropy`: 목표 엔트로피 (동적 조정: -3.6 → -3.0)
-   - `recent_actions`: 최근 액션 히스토리 (탐색 메트릭용)
-
-**주요 메서드**:
-
-1. **`__init__(cfg)`**
-   - 네트워크 초기화
-   - 옵티마이저 설정
-   - 리플레이 버퍼 생성
-   - Target entropy 동적 조정 준비
-
-2. **`update_std_scale(episode_num)`**
-   - **표준편차 Annealing**
-   - 선형 감소: 1.0 → 0.5 (0~150 에피소드)
-   - 탐색 강도 점진적 감소
-
-3. **`update_target_entropy(episode_num)`**
-   - **Target Entropy 동적 조정**
-   - 초기 100ep: -1.2×action_dim (공격적 탐색)
-   - 이후: -1.0×action_dim (표준)
-   - 점진적 전환
-
-4. **`select_action(state, evaluate=False)`**
-   - 액션 선택
-   - `evaluate=False`: 탐색 (std_scale 적용)
-   - `evaluate=True`: 평가 (평균값만 사용)
-   - PID gain으로 변환하여 반환
-   - 탐색 메트릭 추적 (최근 액션 저장)
-
-5. **`select_action_random()`**
-   - 안전 위반 시 랜덤 PID 선택
-
-6. **`store_transition(state, action, reward, next_state, done)`**
-   - Transition 저장
-    - NaN/Inf 검증
-   - 보상 범위: `Constants.REWARD_MIN`~`Constants.REWARD_MAX` (퍼센트 오차 스케일에 맞춤)
-   - PID gain 정규화 ([-1, 1] 범위) — Kp/Ki/Kd 모두 0.01 단위 양자화(소수 둘째 자리)
-
-7. **`update_parameters_one_step(batch_size=None, num_updates=128)`**
-   - **SAC 업데이트 (TD 부트스트랩 적용)**
-   - Critic: `r + γ(1-d)(min(Q_target) - α log π)` 타깃으로 MSE 학습
-   - Actor: KL-regularized 정책 업데이트 (entropy 항 포함)
-   - 자동 엔트로피 튜닝 및 Target Critic Soft Update (tau=0.01)
-   - Gradient clipping (2.0)
-
-8. **`warm_start_buffer(num_samples=None)`**
-   - **Warm-start 버퍼 초기화**
-   - Latin Hypercube Sampling (LHS) 사용
-   - Kp, Ki: 선형 샘플링
-   - Kd: 로그 스케일 샘플링 (안정적인 최소 양수값 확보)
-   - 더미 transition 저장 (50개 샘플)
-
-9. **`log_exploration_metrics(episode_num)`**
-   - **탐색 메트릭 계산**
-   - Action std/range 비율 계산
-   - Kd decade 커버리지 계산
-   - 최근 20개 액션 기준
-
-10. **`save_model(path)`**
-    - 모델 저장 (actor, critic, critic_target, optimizer, cfg)
-
-11. **`load_model(path, strict=True)`**
-    - 모델 로드
-    - 옵티마이저 상태 복원
-    - 보상 히스토리 복원
-
-12. **`transfer_learning_setup(source_model_path, learning_rate_scale=0.1)`**
-    - 전이학습 설정
-    - 학습률 스케일링 (기본 0.1배)
+- **Actor/Critic**: 128-128 MLP 2층. Actor log_std ∈ [-2.5,-0.3], tanh 후 precharge+PID로 스케일링.
+- **탐색 스케줄**:
+  - `update_std_scale(ep)`: std_scale 1.2 → 0.5 선형(0~180 ep).
+  - `update_target_entropy(ep)`: -1.2×action_dim → -0.9×action_dim을 120 ep에 걸쳐 전환.
+  - `recent_actions` 기반 탐색 메트릭(표준편차 비율, Kd 커버리지) 20개 이상일 때 계산.
+- **리플레이/Warm-start**: `ReplayBuffer` maxlen 기본 10000. `warm_start_buffer()`가 LHS(또는 랜덤)로 PID 샘플 50개를 더미 transition으로 채움.
+- **액션 처리**:
+  - `select_action(state, evaluate=False)`: std_scale 적용 샘플 → `scale_action_to_control`로 (precharge, PID) 반환.
+  - `select_action_random()`: 안전 위반 시 사용할 랜덤 precharge+PID 생성.
+  - `store_transition(...)`: NaN/Inf 가드, 보상 클리핑([-1,1]), precharge/PID를 [-1,1]로 정규화해 저장(Kd는 로그 스케일 지원).
+- **학습**: `update_parameters_one_step(batch_size, num_updates=128)`에서 SAC 업데이트, gradient clip 2.0, 자동 엔트로피 튜닝 지원. 에피소드 150 이후 학습률을 0.7배로 한 번만 축소.
+- **모델 입출력**: `save_model`, `load_model`, `transfer_learning_setup`(전이학습 시 학습률 스케일).
 
 ---
 
 ## 2. `env.py` - PID Gain 강화학습 환경
+**경로**: `py_rl/pid_gain_rl/experiment/core/env.py`  
+**역할**: 통신 연결, 에피소드 실행/보상 계산/세그먼트 전처리, 로깅·모니터링
 
-**파일 경로**: `py_rl/pid_gain_rl/env.py`  
-**줄 수**: ~1472줄  
-**역할**: 강화학습 환경, 에피소드 관리, 보상 계산, 상태 생성
+- **초기화**: `cfg["STATE_DIM"]`을 Constants 값(10)으로 강제, 로그 폴더 구조 구성, `PIDGainCommunicator`, `PIDGainSACAgent`, 실시간 모니터 준비.
+- **보상 계산**: `calculate_episode_reward(force_data, pi_output_data, target_force, episode_len_s)`  
+  - 평균 절대 오차%를 `REWARD_ERROR_REF_PERCENT(30%)` 기준으로 선형 스케일해 [-1,1] 클리핑.  
+  - rmse/overshoot/settling_time(0.5s 연속 유지), band_ratio(±1.5N) 등 지표 반환.
+- **메인 루프 `run_pid_optimization_training(episodes)`**:
+  - 통신 서버 bind/accept 후 RL 활성화(sander_active True)까지 대기.
+  - Warm-start 버퍼 1회 수행(옵션).  
+  - Ep1은 고정 PID(40,50,0) + precharge 중간값으로 시작, 이후 에피소드는 이전에 미리 전송한 PID/프리차지 사용.
+  - sander_active 상승 에지 감지 후 1kHz 데이터 수집(기본 10s, 워밍업 스킵 0s). 통신 반복값 감지 시 에피소드 무효 처리 후 재시도.
+  - 안전 위반(|force|>100N) 시 즉시 패널티 -1, 랜덤 PID를 다음 에피소드로 전송(episode_done=True) 후 짧은 리셋 대기.
+  - 수집 완료 시 5개 세그먼트로 분할 → 각 세그먼트 보상/지표 계산 → `store_transition()` 저장 → `update_parameters_one_step()`로 SAC 업데이트.
+  - Reward/Force/PI를 실시간 모니터에 10Hz로 전송, ControlPerformance/RewardBreakdown 로거에 기록. 모델/보상 그래프 저장은 로거·DataSaver를 통해 처리.
 
-### 주요 클래스: `PIDGainEnvironment`
+---
 
-#### 2.1 초기화 (`__init__`)
+## 3. `comm.py` - 로봇 통신 래퍼
+**경로**: `py_rl/pid_gain_rl/experiment/core/comm.py`  
+**역할**: TCP 서버 소켓으로 로봇 제어 PC와 통신, 상태 수신(기본 1kHz)·PID 전송
 
-**주요 속성**:
+- **수신 패킷(>HffffffBfffBH, 46B)**  
+  SOF 0xAAAA, current_force, target_force, force_error, force_error_dot, force_error_int, pi_output, sander_active(1B), precharge_applied, j3_prep, prep_force_avg, prep_flag(1B), checksum(CRC16). 준비 구간에서 prep_flag ON 동안 force를 적산해 prep_force_avg로 고정 후 상승 에지에서 유지.
+- **전송 패킷(>HffffBBBH, 23B)**  
+  SOF 0xBBBB, precharge(소수 4자리로 라운드), Kp, Ki, Kd, timing_accurate, episode_done, learning_done, checksum(CRC16).
+- 수신 스레드가 `RECV_INTERVAL_SEC` 주기로 패킷 파싱. 2초 이상 데이터 지연 시 1회 경고.
+- `send_pid_once(...)`: PID/프리차지 전송 및 로깅. episode_done=True일 때 다음 에피소드용 precharge/PID 모두 포함. `send_reset()`은 간단한 리셋 패킷 전송. `get_communication_stats/print_communication_stats`로 통계 제공.
 
-1. **설정**:
-   - `cfg`: 설정 딕셔너리
-   - `STATE_DIM`: 6차원 강제 설정 (현재 힘, 목표 힘, 오차, 오차 미분/적분, PI 출력)
+---
 
-2. **컴포넌트**:
-   - `agent`: SAC 에이전트
-   - `comm`: 통신 객체
-   - `cplogger`: 제어 성능 로거
-   - `rlogger`: 보상 분석 로거
-   - `ldlogger`: 학습 완료 로거
+## 4. `monitor.py` - 실시간 모니터
+**경로**: `py_rl/pid_gain_rl/experiment/core/monitor.py`  
+**역할**: 별도 프로세스에서 Force/Reward/PID/PI를 시각화
 
-3. **에피소드 데이터**:
-   - `episode_force_data`: 힘 데이터 수집
-   - `episode_pi_output_data`: PI 출력 데이터 수집
-   - `current_pid_gains`: 현재 PID gain
-
-4. **히스토리**:
-   - `previous_pid_gains`: 이전 에피소드 PID
-   - `pid_gains_next`: 다음 에피소드 PID (미리 전송)
-   - `episode_history`: 최근 5개 에피소드 기록
-   - `historical_errors`: 최근 10개 에피소드 에러
-
-#### 2.2 보상 계산 (`calculate_episode_reward`)
-
-**역할**: 힘 오차 기반 단순 보상 계산
-
-**주요 로직**:
-1. 입력 검증 후 힘 배열, 목표 힘, 에피소드 길이 확보
-2. 평균 힘 오차 및 평균 힘 오차(%) 계산
-3. `REWARD_ERROR_REF_PERCENT` 대비 평균 오차 비율을 선형 스케일링  
-   - 평균 오차 % = 0 → 보상 1  
-   - 평균 오차 % = 기준값의 절반 → 보상 0  
-   - 평균 오차 % = 기준값 → 보상 -1 (그 이상은 하한에서 포화)
-4. 추가 메트릭 산출
-   - `rmse`, `rmse_pct`, `overshoot`, `settling_time`
-   - `band_ratio`, `band_time`, `out_of_band_time`, `pi_rms`
-5. 로깅 호환성을 위해 `reward_score`, `r_centered`, `r_baseline` 등을 함께 반환
-
-#### 2.3 세그먼트 상태 생성 (`_build_segment_state`)
-
-**역할**: 세그먼트별 6차원 상태 벡터 생성
-
-**구성**:
-- 세그먼트 마지막 샘플의 센서 값을 그대로 사용  
-  `[현재힘, 목표힘, 힘 오차, 오차 미분, 오차 적분, PI 출력]`
-- 데이터가 없을 경우 영벡터 반환
-
-#### 2.4 메인 학습 루프 (`run_pid_optimization_training`)
-
-**역할**: 전체 강화학습 루프 실행
-
-**단계**:
-
-1. **연결 설정**:
-   - TCP/IP 연결 대기
-   - RL 활성화 대기 (sander_active=True)
-
-2. **모니터 시작**:
-   - 실시간 모니터링 GUI 시작 (10 Hz)
-
-3. **Warm-start**:
-   - 첫 에피소드 전에만 버퍼 초기화 (LHS 샘플링)
-
-4. **에피소드 루프**:
-   - **초기 상태 생성**: 이전 PID 또는 기준 PID 사용
-   - **PID gain 선택**: 첫 에피소드는 기준 PID (40, 50, 0)
-   - **에피소드 시작 신호 전송**: episode_done=False
-   - **데이터 수집**: 1kHz로 10초간 수집
-   - **안전 위반 체크**: 힘 > ±100N → 조기 종료
-   - **세그먼트 분할**: 5개 세그먼트 (2초씩)
-   - **세그먼트별 보상 계산**: 각 세그먼트 보상 계산
-   - **세그먼트별 상태 생성**: 6차원 상태 벡터
+- TkAgg 사용 가능 시 GUI 창, 불가 시 Agg 백엔드로 headless 로그만 유지.  
+- `post_force`, `post_reward`, `post_pid`, `post_pi_output`로 메시지 전송, `reset_force_buffers`로 버퍼 초기화, `stop()`은 종료 메시지 후 조인.
+   - **세그먼트별 상태 생성**: 10차원 상태 벡터 (통신 패킷 전체)
    - **리플레이 버퍼 저장**: 세그먼트별 transition 저장
    - **10-episode 로그**: 매 10번째 에피소드마다 `control_log/`에 힘 궤적 그래프(PNG)와 raw CSV 저장
    - **표준편차 Annealing 업데이트**
@@ -265,7 +80,7 @@
    - **학습**: 버퍼 크기 >= 32일 때 업데이트 (35회)
    - **최고 성능 모델 저장**: 50 에피소드 이후 최고 보상만 저장
    - **다음 PID 계산**: 다음 에피소드 PID 미리 계산
-   - **에피소드 완료 신호 전송**: episode_done=True + 다음 PID (Kp, Ki, Kd 모두 전송)
+   - **에피소드 완료 신호 전송**: episode_done=True + 다음 PID/프리차지(precharge, Kp, Ki, Kd 모두 전송)
    - **로봇 리셋 대기**: 2초 대기 (모니터링 지속)
 
 5. **최종 처리**:
@@ -294,7 +109,7 @@
 
 ## 3. `comm.py` - TCP/IP 통신 래퍼
 
-**파일 경로**: `py_rl/pid_gain_rl/comm.py`  
+**파일 경로**: `py_rl/pid_gain_rl/experiment/core/comm.py`  
 **줄 수**: ~357줄  
 **역할**: 로봇 제어 PC와의 TCP/IP 통신 관리
 
@@ -311,10 +126,10 @@
 - `latest_sander_active`: 최신 RL 활성화 플래그
 
 **패킷 포맷**:
-- **수신 (C++ → Python)**: `>HffffffBH` (29 bytes)
-  - SOF, current_force, target_force, force_error, force_error_dot, force_error_int, pi_output, sander_active, checksum
-- **전송 (Python → C++)**: `>HfffBBBH` (19 bytes)
-  - SOF, Kp, Ki, Kd, timing_accurate, episode_done, learning_done, checksum
+- **수신 (C++ → Python)**: `>HffffffBfffBH` (46 bytes)  
+  SOF 0xAAAA, current_force, target_force, force_error, force_error_dot, force_error_int, pi_output, sander_active(1B), precharge_applied, j3_prep, prep_force_avg, prep_flag(1B), checksum(CRC16)
+- **전송 (Python → C++)**: `>HffffBBBH` (23 bytes)  
+  SOF 0xBBBB, precharge, Kp, Ki, Kd, timing_accurate, episode_done, learning_done, checksum(CRC16)
 
 #### 3.2 주요 메서드
 
@@ -339,7 +154,7 @@
    - 패킷 언팩
    - SOF 검증
    - 체크섬 검증 (CRC16)
-   - 상태 배열 생성 (6차원)
+   - 상태 배열 생성 (10차원: 통신 패킷 전체)
    - 통계 업데이트
 
 6. **`calculate_crc16(data)`**
@@ -373,7 +188,7 @@
 
 ## 4. `monitor.py` - 실시간 모니터링 GUI
 
-**파일 경로**: `py_rl/pid_gain_rl/monitor.py`  
+**파일 경로**: `py_rl/pid_gain_rl/experiment/core/monitor.py`  
 **줄 수**: ~188줄  
 **역할**: 실시간 모니터링 GUI (matplotlib)
 
@@ -441,7 +256,7 @@
 ### Environment 모듈
 - **보상 함수**: 평균 힘 오차(%) 기반 단순 선형 보상 (0%→1, 100%→-1)
 - **세그먼트 분할**: 5개 세그먼트 (2초씩, 총 10초)
-- **6차원 상태**: 현재 힘/목표 힘/오차/오차 미분·적분/PI 출력
+- **10차원 상태**: 통신 패킷 전체 사용(힘/오차/PI 출력 + prep 컨텍스트 4채널)
 - **안전 위반 처리**: 힘 > ±100N → 즉시 종료 및 패널티
 - **로그 관리**: 매 10번째 에피소드마다 `control_log/`에 힘 궤적 그래프·CSV 저장
 
@@ -458,4 +273,3 @@
 ---
 
 **다음**: CODE_FUNCTIONALITY_3.md - 유틸리티 및 로거 모듈
-

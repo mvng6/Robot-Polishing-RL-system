@@ -1,188 +1,64 @@
 # 📋 코드 기능 상세 분석 - Part 3: 유틸리티 및 로거 모듈
 
-## 📁 모듈 목록
+## 📁 모듈 목록 (experiment/utils)
+- `utils/math_utils.py` → `experiment/utils/utils/math_utils.py` (액션 스케일링·초기 상태 생성)
+- `utils/data_saver.py` → `experiment/utils/utils/data_saver.py` (학습 중 데이터 저장)
+- `utils/signals.py` → `experiment/utils/utils/signals.py` (SIGINT/SIGTERM 안전 종료)
+- `loggers/base_logger.py` → `experiment/utils/loggers/base_logger.py`
+- `loggers/control_performance.py` → `experiment/utils/loggers/control_performance.py`
+- `loggers/reward_breakdown.py` → `experiment/utils/loggers/reward_breakdown.py`
+- `loggers/learning_done.py` → `experiment/utils/loggers/learning_done.py`
 
-### 유틸리티 모듈 (`utils/`)
-1. `math_utils.py` - 수학 유틸리티 (PID 액션 스케일링, 상태 생성)
-2. `data_saver.py` - 데이터 저장 유틸리티
-3. `signals.py` - 시그널 처리 (안전한 종료)
-
-### 로거 모듈 (`loggers/`)
-4. `base_logger.py` - 기본 로거 (AppLogger)
-5. `control_performance.py` - 제어 성능 로거
-6. `reward_breakdown.py` - 보상 분석 로거
-7. `learning_done.py` - 학습 완료 로거
+---
+## 🆕 최근 포인트
+- 모든 경로는 `py_rl/pid_gain_rl/experiment/utils/...`.
+- STATE_DIM=10, ACTION_DIM=4에 맞춰 스케일링·초기 상태 생성 로직 정리.
+- ControlPerformance/RewardBreakdown가 learning_done 하위에 CSV+PNG를 생성해 DataSaver/신호 처리 시 자동 저장.
 
 ---
 
-## 1. `utils/math_utils.py` - 수학 유틸리티
+## 1. `utils/math_utils.py` - 수학 유틸
+**경로**: `py_rl/pid_gain_rl/experiment/utils/utils/math_utils.py`  
+**역할**: [-1,1] 내부 액션을 실제 precharge/PID로 매핑하고 초기 상태를 구성.
 
-**파일 경로**: `py_rl/pid_gain_rl/utils/math_utils.py`  
-**줄 수**: ~120줄  
-**역할**: PID 액션 스케일링 및 초기 상태 생성
-
-### 주요 함수
-
-#### 1.1 `scale_action_to_pid(action, pid_range)`
-
-**역할**: 액션을 PID gain으로 스케일링
-
-**매개변수**:
-- `action`: 정규화된 액션 배열 ([-1, 1] 범위, 3차원)
-- `pid_range`: PID 범위 딕셔너리
-
-**로직**:
-1. **Kp, Ki**: 선형 매핑 후 0.01 단위 양자화
-   ```python
-   kp = kp_lo + (a[0] + 1.0) * 0.5 * (kp_hi - kp_lo)
-   ki = ki_lo + (a[1] + 1.0) * 0.5 * (ki_hi - ki_lo)
-   ```
-   - `round(value / 0.01) * 0.01`으로 소수 둘째 자리까지 유지
-
-2. **Kd**: 로그 스케일 매핑 후 0.01 단위 양자화
-   ```python
-   kd_log = loL + (a[2] + 1.0) * 0.5 * (hiL - loL)
-   kd = 10 ** kd_log
-   ```
-   - 최소값 0.01, 최대값 0.1 범위 유지
-   - `round(kd / 0.01) * 0.01`으로 소수 둘째 자리까지 유지
-
-**반환값**: `np.array([kp, ki, kd], dtype=np.float32)`
-
-#### 1.2 `create_initial_state(force_data, target_force, prev_pid_gains=None, episode_history=None, dt_sec=0.001)`
-
-**역할**: 초기 상태 벡터 생성 (6차원)
-
-**매개변수**:
-- `force_data`: 힘 데이터 리스트
-- `target_force`: 목표 힘
-- `prev_pid_gains`: 이전 PID gain [Kp, Ki, Kd]
-- `episode_history`: 에피소드 히스토리 (미사용)
-- `dt_sec`: 샘플링 시간 (미사용)
-
-**로직**:
-- 현재 힘 (`force_data`가 없으면 `Constants.INITIAL_CONTACT_FORCE` = -45.0N 사용)
-- 목표 힘 (기본: -60.0N)
-- 힘 오차 (현재 힘 − 목표 힘)
-- 오차 미분 (초기 0.0)
-- 오차 적분 (초기 0.0)
-- PI 출력 (없으면 `Constants.INITIAL_PI_OUTPUT` = 0.05MPa 사용)
-
-**NaN/Inf 가드**: NaN/Inf 발생 시 0으로 치환
-
-**반환값**: `np.array` (6차원, dtype=np.float32)
+- `scale_action_to_control(action, pid_range, precharge_range)`:  
+  precharge 0.01~0.03 선형 매핑(클리핑), Kp/Ki 선형+0.01 step 양자화, Kd는 작은 범위(≤0.03)면 선형·그 외 로그 매핑 후 0.001/0.01 step 양자화(소수 3자리).  
+- `scale_action_to_pid(action, pid_range)`: precharge 없이 PID만 동일 규칙으로 변환/양자화.
+- `create_initial_state(force_data, target_force, ...)`: 힘 데이터가 없으면 `INITIAL_CONTACT_FORCE=-45.0`/`INITIAL_PI_OUTPUT=0.05`을 사용해 [힘, 목표, 오차, 오차미분, 오차적분, PI, prep 4채널 0]의 10차원 상태를 생성(NaN/Inf 가드 포함).
 
 ---
 
-## 2. `utils/data_saver.py` - 데이터 저장 유틸리티
+## 2. `utils/data_saver.py` - 데이터 저장
+**경로**: `py_rl/pid_gain_rl/experiment/utils/utils/data_saver.py`  
+**역할**: 학습 중간/종료 시 모든 로그를 한번에 저장.
 
-**파일 경로**: `py_rl/pid_gain_rl/utils/data_saver.py`  
-**줄 수**: ~62줄  
-**역할**: 모든 데이터 저장 통합 관리
-
-### 주요 클래스
-
-#### 2.1 `Logger` 클래스
-
-**역할**: 간단한 로거 (타임스탬프 + 아이콘)
-
-**메서드**:
-- `log(level, message)`: 로그 출력
-  - 레벨: INFO, SUCCESS, WARNING, ERROR, DEBUG
-  - 아이콘 자동 추가
-
-#### 2.2 `DataSaver` 클래스
-
-**역할**: 모든 데이터 저장 통합 관리
-
-**메서드**:
-
-1. **`save_all_data(env, current_episode=None, force=True)`**
-   - **보상 분석 데이터 저장**:
-     ```python
-     env.rlogger.flush_if_needed(..., force=True, ...)
-     ```
-   - **제어 성능 지표 저장**:
-     ```python
-     env.cplogger.save_performance_summary()
-     env.cplogger.generate_plots()
-     ```
-   - 예외 처리 포함
+- `Logger.log(level, message)`: 타임스탬프+아이콘 콘솔 로깅.
+- `DataSaver.save_all_data(env, current_episode=None, force=True)`:  
+  `RewardBreakdownLogger.flush_if_needed` 호출로 보상 CSV/PNG 저장, `ControlPerformanceLogger.save_performance_summary()/generate_plots()` 호출로 제어 지표 CSV/그래프 생성. 오류는 로깅하고 학습은 유지.
 
 ---
 
 ## 3. `utils/signals.py` - 시그널 처리
+**경로**: `py_rl/pid_gain_rl/experiment/utils/utils/signals.py`  
+**역할**: SIGINT/SIGTERM 시 안전 종료.
 
-**파일 경로**: `py_rl/pid_gain_rl/utils/signals.py`  
-**줄 수**: ~76줄  
-**역할**: 안전한 종료 처리 (SIGINT, SIGTERM)
-
-### 주요 함수
-
-#### 3.1 `signal_handler(signum, frame, env=None)`
-
-**역할**: 시그널 핸들러 (SIGINT, SIGTERM)
-
-**로직**:
-1. **학습 종료 신호 전송**:
-   ```python
-   env.comm.send_pid_once(0.0, 0.0, 0.0, True, False, True)
-   ```
-   - `learning_done=True` 전송
-
-2. **데이터 저장**:
-   - 보상 분석 데이터 저장
-   - 제어 성능 지표 저장
-
-3. **프로그램 종료**: `sys.exit(0)`
-
-#### 3.2 `install_signal_handlers()`
-
-**역할**: 시그널 핸들러 설치
-
-**로직**:
-- `__main__` 모듈에서 `_global_env` 참조
-- SIGINT, SIGTERM 핸들러 등록
-
-**사용**: `__main__.py`, `main.py`에서 호출
+- `signal_handler(signum, frame, env=None)`: `learning_done=True` PID 패킷 전송 후 RewardBreakdown/ControlPerformance 저장, 종료.
+- `install_signal_handlers()`: SIGINT/SIGTERM을 래핑해 `__main__` 또는 `pid_gain_rl.experiment.config.__main__`에 있는 `_global_env`를 찾아 handler에 전달.
 
 ---
 
-## 4. `loggers/base_logger.py` - 기본 로거
+## 4. 로그 모듈
 
-**파일 경로**: `py_rl/pid_gain_rl/loggers/base_logger.py`  
-**줄 수**: ~28줄  
-**역할**: 애플리케이션 로거 (Python 표준 logging 래핑)
+- **`loggers/base_logger.py` (AppLogger)**: `[HH:MM:SS.mmm]` 타임스탬프 + 레벨별 아이콘(ℹ️/✅/⚠️/❌/🔍)으로 콘솔 출력.
 
-### 주요 클래스: `AppLogger`
+- **`loggers/control_performance.py` (ControlPerformanceLogger)**:  
+  Force/Target/PI/PID 시계열을 적산해 에피소드별 지표(RMSE, Steady-State Error, Rise/Settling Time, Overshoot, IAE, Input RMS, Total Variation, Band Ratio=Success Rate, Error Variance)를 계산/CSV 저장하고 matplotlib로 그래프 생성(기본 폰트 Times New Roman, 크기 상향). 디렉터리는 learning_done 하위 `control_performance`.
 
-**역할**: 타임스탬프 + 아이콘 로거
+- **`loggers/reward_breakdown.py` (RewardBreakdownLogger)**:  
+  스텝별 `prog/in_band_now/edot_abs/du_abs/reward`를 버퍼에 저장, episode_rewards CSV와 이동평균(기본 50) 컬럼, 에피소드 보상 PNG 생성. 학습 종료 시 `flush_if_needed`로 자동 저장. 디렉터리는 learning_done 하위 `reward_breakdown`.
 
-**메서드**:
-
-1. **`log(level, message)`** (정적 메서드)
-   - 타임스탬프 생성 (`HH:MM:SS.mmm`)
-   - 레벨별 아이콘 매핑:
-     - INFO: ℹ️
-     - SUCCESS: ✅
-     - WARNING: ⚠️
-     - ERROR: ❌
-     - DEBUG: 🔍
-   - 콘솔 출력
-
-**사용**: 모든 모듈에서 `AppLogger.log()` 호출
-
----
-
-## 5. `loggers/control_performance.py` - 제어 성능 로거
-
-**파일 경로**: `py_rl/pid_gain_rl/loggers/control_performance.py`  
-**줄 수**: ~913줄  
-**역할**: 제어공학 지표 계산 및 시각화
-
-### 주요 클래스: `ControlPerformanceLogger`
-
-#### 5.1 초기화 (`__init__`)
+- **`loggers/learning_done.py` (LearningDoneLogger)**:  
+  실행 시점에 `learning_done_YYMMDD_HHhMMm` 폴더를 한 번 생성해 모든 로그·그래프의 베이스 경로로 사용.
 
 **속성**:
 - `log_dir`: 로그 디렉토리

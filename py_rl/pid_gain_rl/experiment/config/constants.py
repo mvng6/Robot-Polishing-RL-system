@@ -5,7 +5,7 @@
 
 class Constants:
     # ===== 상태 공간 차원 설정 =====
-    STATE_BASE_DIM = 6  # 기본 상태 차원 (현재 힘/목표 힘 등 실시간 관측)
+    STATE_BASE_DIM = 10  # 기본 상태 차원 (실시간 관측 6 + 준비 컨텍스트 4)
     STATE_TRAJECTORY_DIM = 0  # 궤적 요약 차원 제거
     STATE_DIM = STATE_BASE_DIM + STATE_TRAJECTORY_DIM  # 총 상태 차원 (6)
     
@@ -23,6 +23,8 @@ class Constants:
         "Ki": (0.0, 70.0),
         "Kd": (0.0, 3e-2),
     }
+    # 프리차지 공압 범위 (MPa)
+    DEFAULT_PRECHARGE_RANGE = (0.01, 0.03)
     
     # 통신 기본 설정
     DEFAULT_RECV_FREQ = 1000
