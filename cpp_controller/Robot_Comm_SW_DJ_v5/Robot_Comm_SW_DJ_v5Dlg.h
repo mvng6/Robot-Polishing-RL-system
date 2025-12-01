@@ -223,13 +223,14 @@ private:
 	std::mutex m_tcpMutex;									// TCP 데이터 보호용 뮤텍스
 
 	// Python으로부터 받은 값을 저장할 멤버 변수
-	//std::atomic<float> m_received_RL_Pressure{ 0.0f };		// RL 잔차 압력 값 [MPa]
+	//std::atomic<float> m_received_RL_Pressure{ 0.0f };			// RL 잔차 압력 값 [MPa]
+	std::atomic<float> m_received_RL_precharge_pressure{ 0.0f };	// RL 예압 압력 값 [MPa]
 	std::atomic<float> m_received_RL_P_Gain{ 0.0f };
 	std::atomic<float> m_received_RL_I_Gain{ 0.0f };
 	std::atomic<float> m_received_RL_D_Gain{ 0.0f };
-	std::atomic<bool> m_received_RL_timing_accurate{ false };	// RL 메시지 수신 플래그
-	std::atomic<bool> m_received_RL_episode_done{ false };	// RL Episode Flag
-	std::atomic<bool> m_received_RL_learning_done{ false };		// RL End Flag (강화학습 종료 플래그)
+	std::atomic<bool> m_received_RL_timing_accurate{ false };		// RL 메시지 수신 플래그
+	std::atomic<bool> m_received_RL_episode_done{ false };			// RL Episode Flag
+	std::atomic<bool> m_received_RL_learning_done{ false };			// RL End Flag (강화학습 종료 플래그)
 
 	// ===============================
 	//  쓰레드 핸들

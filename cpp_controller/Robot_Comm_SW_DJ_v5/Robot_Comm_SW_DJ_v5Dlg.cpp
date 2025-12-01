@@ -36,6 +36,20 @@ CDRFLEx Drfl;
 static int i_ont = 0;
 clock_t t_check, t_check_old;
 
+// -----------------------------------------------
+// 유틸리티 함수: 부동소수점 정밀도 제어
+// -----------------------------------------------
+/**
+ * @brief 부동소수점 값을 지정된 소수점 자리수로 반올림
+ * @param value 반올림할 값
+ * @param decimals 소수점 자리수 (예: 3이면 소수점 3번째 자리까지)
+ * @return 반올림된 값
+ */
+inline double roundToDecimalPlaces(double value, int decimals) {
+	const double multiplier = std::pow(10.0, decimals);
+	return std::round(value * multiplier) / multiplier;
+}
+
 /////////////////////////////////////////////
 // 2. 클래스 생성자 및 초기화 함수
 /////////////////////////////////////////////
@@ -1413,8 +1427,8 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 	// PID 게인 및 바운드 설정 
 	// 준영씨 수정 값(초기 PID 게인값)
 	g_pDlg->m_pidctrl.setGains(
-		40.0,			// Kp
-		50.0,			// Ki
+		35.0,			// Kp
+		35.0,			// Ki
 		0.0);			// Kd
 	g_pDlg->m_pidctrl.setOutputLimits(
 		-1500.0,		// min
@@ -1424,12 +1438,14 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 
 	// ===============================================
 	// RL 통신용 변수 초기화
+	float RL_precharge = 0.0f;									// 초기 공압값 초기화
 	float RL_previous_error_force_z = 0.0f;						// 이전 접촉력 오차값 초기화
 	float RL_integral_error_force_z = 0.0f;						// 접촉력 오차 적분값 초기화
 	const float RL_dt = 0.001f;									// 제어 주기 (초 단위)
 	bool RL_confirm = false;									// RL PC로부터 메세지 수신 확인 플래그 초기화
 	bool episode_ended = false;									// 에피소드 종료 플래그 초기화
 	bool RL_end = false;										// RL 학습 종료 플래그 초기화
+	bool RL_prep_flag = false;									// PID 제어기 시작 3초전 플래그 초기화
 
 	// 적분 와인드업 방지를 위한 한계값
 	const float RL_max_integral_limit = 100.0f;					// 최대 적분 한계값
@@ -1498,12 +1514,18 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 			// 다음 측정을 위해 현재 시각을 저장
 			last_message_time = current_message_time;
 
-			RL_confirm = g_pDlg->m_received_RL_timing_accurate.load();
-			episode_ended = g_pDlg->m_received_RL_episode_done.load();
-			RL_end = g_pDlg->m_received_RL_learning_done.load();
-			RL_count++;
-			
-			printf("수신된 Flag : %d\t%d\t%d", RL_confirm, episode_ended, RL_end);
+		RL_precharge = g_pDlg->m_received_RL_precharge_pressure.load();
+		RL_confirm = g_pDlg->m_received_RL_timing_accurate.load();
+		episode_ended = g_pDlg->m_received_RL_episode_done.load();
+		RL_end = g_pDlg->m_received_RL_learning_done.load();
+		RL_count++;
+
+		// 수신된 초기 공압값을 소수점 3자리로 반올림하여 설정
+		// (네트워크 전송 시 float 정밀도 손실을 방지하고 명확한 제어값 사용)
+		set_chamber_air = roundToDecimalPlaces(RL_precharge, 3);
+		
+		printf("수신된 초기 공압: %.6f MPa → 적용값: %.3f MPa\n", RL_precharge, set_chamber_air);
+		printf("수신된 Flag : %d\t%d\t%d", RL_confirm, episode_ended, RL_end);
 
 			if (episode_ended)
 			{
@@ -1569,7 +1591,10 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 			error_force_z_dot,
 			RL_integral_error_force_z,
 			current_chamber_p,
-			g_pDlg->m_flags.RL_sanderactive_flag.load());
+			g_pDlg->m_flags.RL_sanderactive_flag.load(),
+			RL_precharge,
+			Save_pos_z,
+			RL_prep_flag);
 
 		// 서버로 메세지 전송
 		if (g_pDlg->m_tcpClient.IsConnected())
@@ -1650,7 +1675,7 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 				{
 					t_stamp_cd_ns = system_clock::now() - t_cd;
 					t_stamp_cd_ns_float = float(t_stamp_cd_ns.count());
-					float t_stamp_cd_ms_float = t_stamp_cd_ns_float / 1000000.0f;
+					float t_stamp_cd_ms_float = t_stamp_cd_ns_float / 1000000.0f;					
 
 					// 목표 접촉 유지 시간 초과시 접촉 유지 정지 후 다음 단계로 이동
 					if (t_stamp_cd_ms_float > Saturation_time)
@@ -1661,6 +1686,12 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 
 						// 힘제어 시퀀스 시작 알림을 위한 서버로 메세지 전송
 						g_pDlg->m_flags.RL_sanderactive_flag.store(true);
+						RL_prep_flag = false;
+					}
+					// 초기 접촉력 수렴 2초 이후에 RL_prep_flag 활성화
+					else if (t_stamp_cd_ms_float > 2000)
+					{
+						RL_prep_flag = true;
 					}
 					g_pDlg->m_setting.Contact_time = static_cast<int>(Saturation_time - t_stamp_cd_ms_float) * 0.001f;
 				}
@@ -1685,7 +1716,7 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 
 					// PID 컨트롤러 리셋
 					g_pDlg->m_pidctrl.reset();
-					g_pDlg->m_setting.Target_Force_N.store(-65.0f);		// 준영씨 수정 값 (바꿀 목표 접촉력)
+					g_pDlg->m_setting.Target_Force_N.store(-60.0f);		// 준영씨 수정 값 (바꿀 목표 접촉력)
 
 					Status_gui_str.Format(_T("[평면 구동] Control Step 2: 평면 구동 & PID 힘 제어 시작"));
 					g_pDlg->var_status_gui.SetWindowTextW(Status_gui_str);

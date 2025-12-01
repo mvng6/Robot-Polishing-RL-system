@@ -12,6 +12,9 @@ struct PythonCommPacket {
 	float           RL_forceZErrorintegral;		// z방향 접촉력 오차의 적분값 (4 bytes)
 	float           RL_currentPID;				// 현재 PID 제어기 출력값 (4 bytes)
 	bool			RL_sanderactiveFlag;		// Sander 활성화 상태 플래그 (1 byte)
+	float			RL_preccharge_applied;		// 초기 공압 (4 bytes)
+	float           RL_j3;						// 로봇 z 위치좌표(4 bytes)
+	bool            RL_prep_flag;				// 샌더 동작 3초전 알림 플래그 (1 byte)
 	unsigned short  checksum;					// 체크섬 검증용 값 (2 bytes)
 };
 #pragma pack(pop)
@@ -20,6 +23,7 @@ struct PythonCommPacket {
 #pragma pack(push, 1)
 struct RLAgentPacket {
 	unsigned short	sof;						// 0xBBBB(2 bytes)
+	float			RL_precharge;				// RL 에이전트에서 명령한 초기 공압값 (4 bytes)
 	float			RL_gain_P;					// PID P 게인값 (4 bytes)
 	float			RL_gain_I;					// PID I 게인값 (4 bytes)
 	float			RL_gain_D;					// PID D 게인값 (4 bytes)
@@ -40,7 +44,8 @@ unsigned short calculate_crc16(const unsigned char* data, size_t length);
 // PythonCommPacket을 바이트 스트림으로 변환 (Packing)
 std::vector<char> PackRobotStatus(float current_forceZ, float target_forceZ,
 	float error_forceZ, float error_forceZ_dot, float error_forceZ_int,
-	float cur_PID_output, bool Sander_Flag);
+	float cur_PID_output, bool Sander_Flag, 
+	float precharge_applied, float j3, bool prep_flag);
 
 // 수신된 바이트 데이터를 RLAgentPacket 구조체로 변환 (Unpacking)
 // 성공 시 true, 체크섬 오류 시 false 반환
