@@ -89,11 +89,6 @@ bool UnpackRLAgentCommand(const char* buffer, int length, RLAgentPacket& outPack
 	// 2. 네트워크 바이트 순서 변환 (Network to Host)
 	outPacket.sof = ntohs(received_packet.sof);
 
-	/* 기존 압력 보정값 처리
-	float rl_Pressure = received_packet.RL_ResidualP;
-	*(unsigned long*)&rl_Pressure = ntohl(*(unsigned long*)&rl_Pressure);
-	outPacket.RL_ResidualP = rl_Pressure;*/
-
 	// 초기 공압값의 네트워크 바이트 순서 변환 (Network to Host)
 	float rl_precharge = received_packet.RL_precharge;
 	*(uint32_t*)&rl_precharge = ntohl(*(uint32_t*)&rl_precharge);

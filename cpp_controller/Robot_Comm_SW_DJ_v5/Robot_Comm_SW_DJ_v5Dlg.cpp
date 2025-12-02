@@ -1447,6 +1447,8 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 	bool RL_end = false;										// RL 학습 종료 플래그 초기화
 	bool RL_prep_flag = false;									// PID 제어기 시작 3초전 플래그 초기화
 
+	int RL_test_count = 1;										// C++ 제어기 내에서 현재 테스트 회차 카운트 변수
+
 	// 적분 와인드업 방지를 위한 한계값
 	const float RL_max_integral_limit = 100.0f;					// 최대 적분 한계값
 	const float RL_min_integral_limit = -100.0f;				// 최소 적분 한계값
@@ -1514,29 +1516,30 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 			// 다음 측정을 위해 현재 시각을 저장
 			last_message_time = current_message_time;
 
-		RL_precharge = g_pDlg->m_received_RL_precharge_pressure.load();
-		RL_confirm = g_pDlg->m_received_RL_timing_accurate.load();
-		episode_ended = g_pDlg->m_received_RL_episode_done.load();
-		RL_end = g_pDlg->m_received_RL_learning_done.load();
-		RL_count++;
+			RL_precharge = g_pDlg->m_received_RL_precharge_pressure.load();
+			RL_confirm = g_pDlg->m_received_RL_timing_accurate.load();
+			episode_ended = g_pDlg->m_received_RL_episode_done.load();
+			RL_end = g_pDlg->m_received_RL_learning_done.load();
+			RL_count++;
 
-		// 수신된 초기 공압값을 소수점 3자리로 반올림하여 설정
-		// (네트워크 전송 시 float 정밀도 손실을 방지하고 명확한 제어값 사용)
-		set_chamber_air = roundToDecimalPlaces(RL_precharge, 3);
+			// 수신된 초기 공압값을 소수점 3자리로 반올림하여 설정
+			// (네트워크 전송 시 float 정밀도 손실을 방지하고 명확한 제어값 사용)
+			set_chamber_air = roundToDecimalPlaces(RL_precharge, 3);
 		
-		printf("수신된 초기 공압: %.6f MPa → 적용값: %.3f MPa\n", RL_precharge, set_chamber_air);
-		printf("수신된 Flag : %d\t%d\t%d", RL_confirm, episode_ended, RL_end);
-
 			if (episode_ended)
-			{
+			{ 
 				g_pDlg->m_pidctrl.setGains(
 					g_pDlg->m_received_RL_P_Gain.load(),
 					g_pDlg->m_received_RL_I_Gain.load(),
 					g_pDlg->m_received_RL_D_Gain.load()
 				);
-				printf("수신된 PID 게인 = %.3f\t%.3f\t%.3f\n",
+				RL_test_count++;
+				printf("======================================\n");
+				printf("현재 실험 회차: %d\n", RL_test_count);
+				printf("수신된 Flag: %d\t%d\t%d\n", RL_confirm, episode_ended, RL_end);
+				printf("수신된 공압 메세지: %.6f\t%.3f\t", RL_precharge, set_chamber_air);
+				printf("수신된 PID 게인 메세지: %.3f\t%.3f\t%.3f\n",
 					g_pDlg->m_received_RL_P_Gain.load(), g_pDlg->m_received_RL_I_Gain.load(), g_pDlg->m_received_RL_D_Gain.load());
-				// ====================================
 
 				g_pDlg->m_setting.Target_Force_N.store(-45.0f);		// 준영씨 수정값 (에피소드 종료 후 초기 접촉값 설정)
 				g_pDlg->m_airctrl.setDesiredChamberPressure(set_chamber_air);
@@ -1546,7 +1549,7 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 				g_pDlg->m_setting.First_Contact.store(true);
 				g_pDlg->m_setting.Control_Step = 99;			// 에피소드 종료로 인한 환경 리셋
 			}
-			else if (RL_end)
+			else if (RL_end == true)
 			{
 				g_pDlg->m_setting.First_Contact.store(true);
 				g_pDlg->m_setting.Control_Step = 3;					// RL 학습 종료로 인한 로봇 구동 종료
@@ -2763,6 +2766,7 @@ void CRobotCommSWDJv5Dlg::OnRlDataReceived(const RLAgentPacket& packet)
 	// 모든 처리가 끝난 깨끗한 구조체를 바로 사용
 	// 원자적 멤버 변수에 값 저장 (스레드 안전)
 	//m_received_RL_Pressure.store(packet.RL_ResidualP);
+	m_received_RL_precharge_pressure.store(packet.RL_precharge);
 	m_received_RL_P_Gain.store(packet.RL_gain_P);
 	m_received_RL_I_Gain.store(packet.RL_gain_I);
 	m_received_RL_D_Gain.store(packet.RL_gain_D);
