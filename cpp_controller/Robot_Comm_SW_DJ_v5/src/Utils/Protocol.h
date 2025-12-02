@@ -1,48 +1,52 @@
 #pragma once
 #include <vector>
 
-// C++ -> Python Àü¼Û¿ë ÆĞÅ¶
+// C++ -> Python í†µì‹ ìš© íŒ¨í‚·
 #pragma pack(push, 1)
 struct PythonCommPacket {
 	unsigned short	sof;						// 0xAAAA (2 bytes)
-	float			RL_currentForceZ;			// ÇöÀçÀÇ z¹æÇâ Á¢ÃË·Â (4 bytes)
-	float			RL_targetForceZ;			// ¸ñÇ¥ z¹æÇâ Á¢ÃË·Â (4 bytes)
-	float           RL_forceZError;				// z¹æÇâ Á¢ÃË·Â ¿ÀÂ÷ (4 bytes)
-	float           RL_forceZErrordot;			// z¹æÇâ Á¢ÃË·Â ¿ÀÂ÷ÀÇ ¹ÌºĞ°ª (4 bytes)
-	float           RL_forceZErrorintegral;		// z¹æÇâ Á¢ÃË·Â ¿ÀÂ÷ÀÇ ÀûºĞ°ª (4 bytes)
-	float           RL_currentPID;				// ÇöÀç °ø¾Ğ Ã¨¹ö Á¦¾î ¾Ğ·Â°ª (4 bytes)
-	bool			RL_sanderactiveFlag;		// Sander µ¿ÀÛ ¿©ºÎ ÇÃ·¡±× (1 byte)
-	unsigned short  checksum;					// µ¥ÀÌÅÍ ¹«°á¼º °ËÁõ (2 bytes)
+	float			RL_currentForceZ;			// í˜„ì¬ zë°©í–¥ ì ‘ì´‰ë ¥ (4 bytes)
+	float			RL_targetForceZ;			// ëª©í‘œ zë°©í–¥ ì ‘ì´‰ë ¥ (4 bytes)
+	float           RL_forceZError;				// zë°©í–¥ ì ‘ì´‰ë ¥ ì˜¤ì°¨ (4 bytes)
+	float           RL_forceZErrordot;			// zë°©í–¥ ì ‘ì´‰ë ¥ ì˜¤ì°¨ì˜ ë¯¸ë¶„ê°’ (4 bytes)
+	float           RL_forceZErrorintegral;		// zë°©í–¥ ì ‘ì´‰ë ¥ ì˜¤ì°¨ì˜ ì ë¶„ê°’ (4 bytes)
+	float           RL_currentPID;				// í˜„ì¬ PID ì œì–´ê¸° ì¶œë ¥ê°’ (4 bytes)
+	bool			RL_sanderactiveFlag;		// Sander í™œì„±í™” ìƒíƒœ í”Œë˜ê·¸ (1 byte)
+	float			RL_preccharge_applied;		// ì´ˆê¸° ê³µì•• (4 bytes)
+	float           RL_j3;						// ë¡œë´‡ z ìœ„ì¹˜ì¢Œí‘œ(4 bytes)
+	bool            RL_prep_flag;				// ìƒŒë” ë™ì‘ 3ì´ˆì „ ì•Œë¦¼ í”Œë˜ê·¸ (1 byte)
+	unsigned short  checksum;					// ì²´í¬ì„¬ ê²€ì¦ìš© ê°’ (2 bytes)
 };
 #pragma pack(pop)
 
-// Python -> C++ ¼ö½Å¿ë ÆĞÅ¶
+// Python -> C++ ìˆ˜ì‹ ìš© íŒ¨í‚·
 #pragma pack(push, 1)
 struct RLAgentPacket {
 	unsigned short	sof;						// 0xBBBB(2 bytes)
-	//float			RL_ResidualP;				// ¼­¹ö(RL ¿¡ÀÌÀüÆ®)·ÎºÎÅÍ °è»êµÈ ÀÜÂ÷ °ø¾Ğ (4 bytes)
-	float			RL_gain_P;
-	float			RL_gain_I;
-	float			RL_gain_D;
-	bool			RL_MessagerecvFlag;			// ¼­¹ö(RL ¿¡ÀÌÀüÆ®)·ÎºÎÅÍ ¸Ş¼¼Áö ¼ö½Å È®ÀÎ¿ë ÇÃ·¡±× (1 byte) - 0: ¸Ş¼¼Áö ¼ö½Å X / 1: ¸Ş¼¼Áö ¼ö½Å O
-	bool			RL_EpisodeFlag;				// ¼­¹ö(RL ¿¡ÀÌÀüÆ®)¿¡¼­ÀÇ ¿¡ÇÇ¼Òµå µ¿ÀÛ ¿©ºÎ È®ÀÎ¿ë ÇÃ·¡±× (1 byte)   - 0: ¿¡ÇÇ¼Òµå µ¿ÀÛ O / 1: ¿¡ÇÇ¼Òµå µ¿ÀÛ X
-	bool			RL_EndFlag;					// ¼­¹ö(RL ¿¡ÀÌÀüÆ®)¿¡¼­ °­È­ÇĞ½À Á¾·á ½ÅÈ£ ÇÃ·¡±× (1 byte)   - 0: °­È­ÇĞ½À ÁøÇà / 1: °­È­ÇĞ½À Á¾·á
-	unsigned short	checksum;					// µ¥ÀÌÅÍ ¹«°á¼º °ËÁõ (2 bytes)
+	float			RL_precharge;				// RL ì—ì´ì „íŠ¸ì—ì„œ ëª…ë ¹í•œ ì´ˆê¸° ê³µì••ê°’ (4 bytes)
+	float			RL_gain_P;					// PID P ê²Œì¸ê°’ (4 bytes)
+	float			RL_gain_I;					// PID I ê²Œì¸ê°’ (4 bytes)
+	float			RL_gain_D;					// PID D ê²Œì¸ê°’ (4 bytes)
+	bool			RL_timing_accurate;			// ì„œë²„(RL ì—ì´ì „íŠ¸)ë¡œë¶€í„° ë©”ì‹œì§€ ìˆ˜ì‹  í™•ì¸ í”Œë˜ê·¸ (1 byte) - 0: ë©”ì‹œì§€ ìˆ˜ì‹  X / 1: ë©”ì‹œì§€ ìˆ˜ì‹  O
+	bool			RL_episode_done;			// ì„œë²„(RL ì—ì´ì „íŠ¸)ì—ì„œ ì—í”¼ì†Œë“œ ì¢…ë£Œ ì‹ í˜¸ í™•ì¸ í”Œë˜ê·¸ (1 byte)   - 0: ì—í”¼ì†Œë“œ ê³„ì† O / 1: ì—í”¼ì†Œë“œ ì¢…ë£Œ X
+	bool			RL_learning_done;			// ì„œë²„(RL ì—ì´ì „íŠ¸)ì—ì„œ í•™ìŠµ ì¢…ë£Œ ì‹ í˜¸ í”Œë˜ê·¸ (1 byte)   - 0: í•™ìŠµ ì¢…ë£Œ / 1: í•™ìŠµ ê³„ì†
+	unsigned short	checksum;					// ì²´í¬ì„¬ ê²€ì¦ìš© ê°’ (2 bytes)
 };
 #pragma pack(pop)
 
 // ==========================================================
-// ÇÁ·ÎÅäÄİ °ü·Ã ÇÔ¼ö ¼±¾ğ
+// í†µì‹  í”„ë¡œí† ì½œ ê´€ë ¨ í•¨ìˆ˜ ì„ ì–¸
 // ==========================================================
 
-// CRC-16 Ã¼Å©¼¶ °è»ê ÇÔ¼ö
+// CRC-16 ì²´í¬ì„¬ ê³„ì‚° í•¨ìˆ˜
 unsigned short calculate_crc16(const unsigned char* data, size_t length);
 
-// PythonCommPacketÀ» Àü¼Û¿ë ¹ÙÀÌÆ® º¤ÅÍ·Î º¯È¯ (Packing)
+// PythonCommPacketì„ ë°”ì´íŠ¸ ìŠ¤íŠ¸ë¦¼ìœ¼ë¡œ ë³€í™˜ (Packing)
 std::vector<char> PackRobotStatus(float current_forceZ, float target_forceZ,
 	float error_forceZ, float error_forceZ_dot, float error_forceZ_int,
-	float cur_PID_output, bool Sander_Flag);
+	float cur_PID_output, bool Sander_Flag, 
+	float precharge_applied, float j3, bool prep_flag);
 
-// ¼ö½ÅµÈ ¹ÙÀÌÆ® µ¥ÀÌÅÍ¸¦ RLAgentPacket ±¸Á¶Ã¼·Î º¯È¯ (Unpacking)
-// ¼º°ø ½Ã true, Ã¼Å©¼¶ ¿À·ù µî ½ÇÆĞ ½Ã false ¹İÈ¯
+// ìˆ˜ì‹ ëœ ë°”ì´íŠ¸ ë°ì´í„°ë¥¼ RLAgentPacket êµ¬ì¡°ì²´ë¡œ ë³€í™˜ (Unpacking)
+// ì„±ê³µ ì‹œ true, ì²´í¬ì„¬ ì˜¤ë¥˜ ì‹œ false ë°˜í™˜
 bool UnpackRLAgentCommand(const char* buffer, int length, RLAgentPacket& outPacket);

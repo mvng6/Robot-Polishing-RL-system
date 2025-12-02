@@ -12,86 +12,90 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-// [Ãâ·Â] : PC -> ºñ·Ê¾Ğ·Â ·¹±Ö·¹ÀÌÅÍ
-// [ÀÔ·Â] : ºñ·Ê¾Ğ·Â ·¹±Ö·¹ÀÌÅÍ -> PC
+// [ì¶œë ¥] : PC -> ê³µì••ì œì–´ ëª…ë ¹ê°’ ì „ë‹¬
+// [ì…ë ¥] : ê³µì••ì œì–´ í”¼ë“œë°±ê°’ -> PC
 
-/// \brief NI-DAQ¸¦ ÀÌ¿ëÇÑ Chamber/Spindle °ø¾Ğ Á¦¾î±â  
+/// \brief NI-DAQë¥¼ ì´ìš©í•œ Chamber/Spindle ê³µì•• ì œì–´ê¸°
 class AirControl {
 public:
 	struct Config
 	{
-		std::string deviceName = "Dev1";        // NI-DAQ ÀåÄ¡ ÀÌ¸§
-		std::string aoTaskName = "AO_Task";     // AO ÅÂ½ºÅ© ÀÌ¸§
-		std::string aiTaskName = "AI_Task";     // AI ÅÂ½ºÅ© ÀÌ¸§
+		std::string deviceName = "Dev1";        // NI-DAQ ì¥ì¹˜ ì´ë¦„
+		std::string aoTaskName = "AO_Task";     // AO íƒœìŠ¤í¬ ì´ë¦„
+		std::string aiTaskName = "AI_Task";     // AI íƒœìŠ¤í¬ ì´ë¦„
 
-		// ¹°¸® Ã¤³Î ¸ñ·Ï (ao0, ao1 µî)
+		// ì¶œë ¥ ì±„ë„ ì„¤ì • (ao0, ao1 ë“±)
 		std::vector<std::string> aoPhysicalChannels = { "ao0", "ao1" }; // Chamber, Spindle
-		std::vector<std::string> aiPhysicalChannels = { "ai0", "ai2" }; // Chamber, Spindle ÇÇµå¹é
+		std::vector<std::string> aiPhysicalChannels = { "ai0", "ai2" }; // Chamber, Spindle í”¼ë“œë°±
 
-		// °¡»ó Ã¤³Î ÀÌ¸§ ¸ñ·Ï (ÄÚµå ³»¿¡¼­ »ç¿ëÇÒ ÀÌ¸§)
+		// ì¶œë ¥ ì±„ë„ ì´ë¦„ ì„¤ì • (ìë™ ìƒì„±ëœ ì±„ë„ëª… ì´ë¦„)
 		std::vector<std::string> aoChannelNames = { "ChamberChannel", "SpindleChannel" };
 		std::vector<std::string> aiChannelNames = { "ChamberFeedback", "SpindleFeedback" };
 
-		// ÇÏµå¿ş¾î Á¦¾à Á¶°Ç
-		double maxVoltage = 10.0;                // ÃÖ´ë Àü¾Ğ (V ´ÜÀ§)
-		double maxChamberPressureMPa = 0.4;      // ÃÖ´ë Chamber °ø¾Ğ (MPa ´ÜÀ§)
-		double maxSpindlePressureMPa = 0.6;      // ÃÖ´ë Spindle °ø¾Ğ (MPa ´ÜÀ§)
+		// í•˜ë“œì›¨ì–´ ì œì•½ ì¡°ê±´
+		double maxVoltage = 10.0;                // ìµœëŒ€ ì „ì•• (V ë‹¨ìœ„)
+		double maxChamberPressureMPa = 0.4;      // ìµœëŒ€ Chamber ì••ë ¥ (MPa ë‹¨ìœ„)
+		double maxSpindlePressureMPa = 0.6;      // ìµœëŒ€ Spindle ì••ë ¥ (MPa ë‹¨ìœ„)
 
-		// ÇÏµå¿ş¾î ¼³Á¤
-		const double MFT_diameter_mm = 94.9;						// MFT Á÷°æ (mm)
-		double MFT_radius_m = MFT_diameter_mm / 2.0 * 1e-3;		    // MFT ¹İÁö¸§ (m)					
-		double A_m2 = M_PI * MFT_radius_m * MFT_radius_m;			// MFT ´Ü¸éÀû (m^2)
+		// í•˜ë“œì›¨ì–´ ìƒìˆ˜
+		const double MFT_diameter_mm = 94.9;						// MFT ì§€ë¦„ (mm)
+		double MFT_radius_m = MFT_diameter_mm / 2.0 * 1e-3;		// MFT ë°˜ì§€ë¦„ (m)					
+		double A_m2 = M_PI * MFT_radius_m * MFT_radius_m;			// MFT ë‹¨ë©´ì  (m^2)
 
-		double max_force_N = maxChamberPressureMPa * 1e6 * A_m2;    // ÃÖ´ë Èû (N ´ÜÀ§) => Chamber °ø¾Ğ¿¡ µû¸¥ ÃÖ´ë Èû        
+		double max_force_N = maxChamberPressureMPa * 1e6 * A_m2;   // ìµœëŒ€ í˜ (N ë‹¨ìœ„) => Chamber ì••ë ¥ì— ì˜í•œ ìµœëŒ€ í˜        
 		double pid_limit = max_force_N * 1.2;
 		const double base_pressure_mpa = 0.2;
 
-		// --- DAQ »ùÇÃ¸µ ¹× Äİ¹é ¼³Á¤ ---
+		// --- DAQ ìƒ˜í”Œë§ ë° ì½œë°± ì„¤ì • ---
 		uInt64 sampleRateHz = 1000;
-		int32 samplesPerCallback = 100; // ÀÌ °³¼ö¸¸Å­ »ùÇÃÀÌ ¸ğÀÌ¸é Äİ¹é È£Ãâ
+		int32 samplesPerCallback = 100; // ëª‡ ìƒ˜í”Œë§Œí¼ ìŒ“ì´ë©´ ì½œë°± í˜¸ì¶œ
 	};
 
-	// »ı¼ºÀÚ/¼Ò¸êÀÚ
+	// ìƒì„±ì/ì†Œë©¸ì
 	explicit AirControl(const Config& config = Config{});
 	~AirControl() { releaseTasks(); }
 
-	//getter ¸Ş¼­µå Ãß°¡
+	// getter ë©”ì„œë“œ ì¶”ê°€
 	double getA_m2() const noexcept { return m_config.A_m2; }
 	double get_base_pressure_mpa() const noexcept { return m_config.base_pressure_mpa; }
 
-	// ÇöÀç »ç¿ë ÁßÀÎ ÅÂ½ºÅ©¸¦ ÃÊ±âÈ­ÇÏ°í ½ÃÀÛ
+	// ì…ë ¥ ì¶œë ¥ ëª¨ë“  íƒœìŠ¤í¬ë¥¼ ì´ˆê¸°í™”í•˜ê³  ì‹œì‘
 	bool initTasks();
 
-	// ÇöÀç »ç¿ë ÁßÀÎ ÅÂ½ºÅ©¸¦ ÇØÁ¦ÇÏ°í ÃÊ±âÈ­ »óÅÂ·Î µÇµ¹¸²
+	// ì…ë ¥ ì¶œë ¥ ëª¨ë“  íƒœìŠ¤í¬ë¥¼ ì •ì§€í•˜ê³  ì´ˆê¸°í™” ìƒíƒœë¡œ ë˜ëŒë¦¼
 	void releaseTasks() noexcept;
 
-	// ÇöÀç ÅÂ½ºÅ©°¡ ÃÊ±âÈ­µÇ¾ú´ÂÁö ¿©ºÎ Á¶È¸
+	// ëª¨ë“  íƒœìŠ¤í¬ê°€ ì´ˆê¸°í™”ë˜ì—ˆëŠ”ì§€ ì—¬ë¶€ ì¡°íšŒ
 	bool isInitialized() const noexcept;
 
-	// [Ãâ·Â] °ø¾Ğ Á¦¾î ·çÇÁ¸¦ ½ÇÇàÇÏ¿© ¾Ğ·Â°ú Àü¾ĞÀ» ¾÷µ¥ÀÌÆ®
+	// [ì¶œë ¥] í˜„ì¬ ëª©í‘œ ì••ë ¥ì„ ì½ì–´ì„œ ì „ì••ê°’ ê³„ì‚°í›„ ì—…ë°ì´íŠ¸
 	void updateOutputs() noexcept;
 
-	// Chamber °ø¾Ğ ¼³Á¤ ¹× ÇÏµå¿ş¾î¸¦ °í·ÁÇÑ ÃÖ´ë Ãâ·Â°ª Å¬·¥ÇÎ
+	// Chamber ëª©í‘œ ì••ë ¥ ì„¤ì • ì‹œ í•˜ë“œì›¨ì–´ ë²”ìœ„ë¡œ ì œí•œí•˜ëŠ” ê°’ê¹Œì§€ í´ë¨í•‘
 	void setDesiredChamberPressure(double pMPa) noexcept {
-		m_desiredChamber = std::clamp(pMPa, 0.0, m_config.maxChamberPressureMPa);
+		// ì†Œìˆ˜ì  3ìë¦¬ë¡œ ë°˜ì˜¬ë¦¼í•˜ì—¬ ëª…í™•í•œ ì œì–´ ì •ë°€ë„ ë³´ì¥
+		double rounded = std::round(pMPa * 1000.0) / 1000.0;
+		m_desiredChamber = std::clamp(rounded, 0.0, m_config.maxChamberPressureMPa);
 	}
-	// Chamber °ø¾Ğ Á¶È¸
+	// Chamber ì••ë ¥ ì¡°íšŒ
 	double desiredChamberPressure() const noexcept { return m_desiredChamber.load(); }
 
-	// Spindle °ø¾Ğ ¼³Á¤ ¹× ÇÏµå¿ş¾î¸¦ °í·ÁÇÑ ÃÖ´ë Ãâ·Â°ª Å¬·¥ÇÎ
+	// Spindle ëª©í‘œ ì••ë ¥ ì„¤ì • ì‹œ í•˜ë“œì›¨ì–´ ë²”ìœ„ë¡œ ì œí•œí•˜ëŠ” ê°’ê¹Œì§€ í´ë¨í•‘
 	void setDesiredSpindlePressure(double pMPa) noexcept {
-		m_desiredSpindle = std::clamp(pMPa, 0.0, m_config.maxSpindlePressureMPa);
+		// ì†Œìˆ˜ì  3ìë¦¬ë¡œ ë°˜ì˜¬ë¦¼í•˜ì—¬ ëª…í™•í•œ ì œì–´ ì •ë°€ë„ ë³´ì¥
+		double rounded = std::round(pMPa * 1000.0) / 1000.0;
+		m_desiredSpindle = std::clamp(rounded, 0.0, m_config.maxSpindlePressureMPa);
 	}
-	// Spindle °ø¾Ğ Á¶È¸
+	// Spindle ì••ë ¥ ì¡°íšŒ
 	double desiredSpindlePressure() const noexcept { return m_desiredSpindle.load(); }
 
-	// [Ãâ·Â] Chamber & Spindle Àü¾Ğ ¹× °ø¾Ğ Á¶È¸
+	// [ì¶œë ¥] Chamber & Spindle ì†¡ì‹  ê°’ ì „ì•• ì¡°íšŒ
 	double sendChamberVoltage() const noexcept { return m_sendVoltChamber.load(); }
 	double sendSpindleVoltage() const noexcept { return m_sendVoltSpindle.load(); }
 	double sendChamberPressure() const noexcept { return m_sendPressChamber.load(); }
 	double sendSpindlePressure() const noexcept { return m_sendPressSpindle.load(); }
 
-	// [ÀÔ·Â] Chamber & Spindle ÇÇµå¹é Àü¾Ğ ¹× °ø¾Ğ Á¶È¸
+	// [ì…ë ¥] Chamber & Spindle í”¼ë“œë°± ì „ì•• ë° ì••ë ¥ ì¡°íšŒ
 	double feedbackChamberVoltage() const noexcept { return m_feedbackVoltChamber.load(); }
 	double feedbackSpindleVoltage() const noexcept { return m_feedbackVoltSpindle.load(); }
 	double feedbackChamberPressure() const noexcept { return m_feedbackPressChamber.load(); }
@@ -99,7 +103,7 @@ public:
 
 
 private:
-	// AO ¹× AI ÅÂ½ºÅ©¸¦ »ı¼ºÇÏ°í Ã¤³ÎÀ» Ãß°¡ÇÑ µÚ ½ÃÀÛ
+	// AO ë° AI íƒœìŠ¤í¬ë¥¼ ìƒì„±í•˜ê³  ì±„ë„ì„ ì¶”ê°€í•˜ëŠ” ë‚´ë¶€ í•¨ìˆ˜
 	bool setupAoTask();
 	bool setupAiTask();
 	bool checkDaqError(int32 error, const char* context) noexcept;
@@ -107,19 +111,19 @@ private:
 
 	Config m_config;
 
-	TaskHandle m_aoTask{ nullptr };                                                     // Ãâ·Â(AO) ÅÂ½ºÅ© ÇÚµé (ÅëÇÕ)
-	TaskHandle m_aiTask{ nullptr };                                                     // ÀÔ·Â(AI) ÅÂ½ºÅ© ÇÚµé (ÅëÇÕ)
+	TaskHandle m_aoTask{ nullptr };                                                     // ì¶œë ¥(AO) íƒœìŠ¤í¬ í•¸ë“¤ (ëª…ë ¹)
+	TaskHandle m_aiTask{ nullptr };                                                     // ì…ë ¥(AI) íƒœìŠ¤í¬ í•¸ë“¤ (í”¼ë“œë°±)
 
-	// --- °øÅë ---
-	std::atomic<long long> m_totalSamplesRead{ 0 };                                     // ÃÑ ÀĞÀº »ùÇÃ ¼ö
-	std::chrono::steady_clock::time_point m_startTime;                                  // ÅÂ½ºÅ© ½ÃÀÛ ½Ã°¢
-	std::atomic<double> m_desiredChamber{ 0.0 }, m_desiredSpindle{ 0.0 };               // °ø¾Ğ ¸ñÇ¥Ä¡ (MPa ´ÜÀ§)
+	// --- í†µê³„ ---
+	std::atomic<long long> m_totalSamplesRead{ 0 };                                     // ì´ ìƒ˜í”Œ ì½ì€ ìˆ˜
+	std::chrono::steady_clock::time_point m_startTime;                                  // íƒœìŠ¤í¬ ì‹œì‘ ì‹œê°„
+	std::atomic<double> m_desiredChamber{ 0.0 }, m_desiredSpindle{ 0.0 };               // ëª©í‘œ ëª©í‘œì¹˜ (MPa ë‹¨ìœ„)
 
-	// Ãâ·Â(AO) °ª ---
-	std::atomic<double> m_sendVoltChamber{ 0.0 }, m_sendVoltSpindle{ 0.0 };             // ¼Û½Å Àü¾Ğ°ª (V ´ÜÀ§)
-	std::atomic<double> m_sendPressChamber{ 0.0 }, m_sendPressSpindle{ 0.0 };           // ¼Û½Å °ø¾Ğ°ª (MPa ´ÜÀ§)
+	// ì¶œë ¥(AO) ê°’ ---
+	std::atomic<double> m_sendVoltChamber{ 0.0 }, m_sendVoltSpindle{ 0.0 };             // ì†¡ì‹  ì „ì••ê°’ (V ë‹¨ìœ„)
+	std::atomic<double> m_sendPressChamber{ 0.0 }, m_sendPressSpindle{ 0.0 };           // ì†¡ì‹  ì••ë ¥ê°’ (MPa ë‹¨ìœ„)
 
-	// --- ÀÔ·Â(AI) °ª ---
-	std::atomic<double> m_feedbackVoltChamber{ 0.0 }, m_feedbackVoltSpindle{ 0.0 };     // ÇÇµå¹é Àü¾Ğ°ª (V ´ÜÀ§)
-	std::atomic<double> m_feedbackPressChamber{ 0.0 }, m_feedbackPressSpindle{ 0.0 };   // ÇÇµå¹é °ø¾Ğ°ª (MPa ´ÜÀ§)
+	// --- ì…ë ¥(AI) ê°’ ---
+	std::atomic<double> m_feedbackVoltChamber{ 0.0 }, m_feedbackVoltSpindle{ 0.0 };     // í”¼ë“œë°± ì „ì••ê°’ (V ë‹¨ìœ„)
+	std::atomic<double> m_feedbackPressChamber{ 0.0 }, m_feedbackPressSpindle{ 0.0 };   // í”¼ë“œë°± ì••ë ¥ê°’ (MPa ë‹¨ìœ„)
 };
