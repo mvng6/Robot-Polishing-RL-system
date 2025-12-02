@@ -1537,7 +1537,7 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 				printf("======================================\n");
 				printf("현재 실험 회차: %d\n", RL_test_count);
 				printf("수신된 Flag: %d\t%d\t%d\n", RL_confirm, episode_ended, RL_end);
-				printf("수신된 공압 메세지: %.6f\t%.3f\t", RL_precharge, set_chamber_air);
+				printf("수신된 공압 메세지: %.6f\t%.3f\t\n", RL_precharge, set_chamber_air);
 				printf("수신된 PID 게인 메세지: %.3f\t%.3f\t%.3f\n",
 					g_pDlg->m_received_RL_P_Gain.load(), g_pDlg->m_received_RL_I_Gain.load(), g_pDlg->m_received_RL_D_Gain.load());
 
@@ -1557,7 +1557,7 @@ UINT CRobotCommSWDJv5Dlg::Thread_Contact_Flat_RL(LPVOID pParam)
 			else
 			{
 				if (reception_period_ms > 0.0) {
-					printf("RL PC로부터 %d번째 메세지 수신 성공! (RL_Gain: %.3f\t%.3f\t%.3f) | 수신 주기: %.2f ms\n",
+					printf("수신 주기: %.2f ms\n",
 						RL_count, g_pDlg->m_received_RL_P_Gain.load(),g_pDlg->m_received_RL_I_Gain.load(),g_pDlg->m_received_RL_D_Gain.load(), reception_period_ms);
 				}
 				else {
