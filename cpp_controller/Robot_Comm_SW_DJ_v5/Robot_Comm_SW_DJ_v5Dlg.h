@@ -223,8 +223,6 @@ private:
 	std::mutex m_tcpMutex;									// TCP 데이터 보호용 뮤텍스
 
 	// Python으로부터 받은 값을 저장할 멤버 변수
-	//std::atomic<float> m_received_RL_Pressure{ 0.0f };			// RL 잔차 압력 값 [MPa]
-	std::atomic<float> m_received_RL_precharge_pressure{ 0.0f };	// RL 예압 압력 값 [MPa]
 	std::atomic<float> m_received_RL_P_Gain{ 0.0f };
 	std::atomic<float> m_received_RL_I_Gain{ 0.0f };
 	std::atomic<float> m_received_RL_D_Gain{ 0.0f };

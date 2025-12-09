@@ -43,10 +43,15 @@ PIDController::Result PIDController::calculate(double setpoint, double measureme
 	// 2) 비례 항 계산
 	const double p_term = m_kp * error;
 
-	// 3) 미분 항 계산 및 1차 필터
-	const double rawDeriv = (m_prevMeasurement - measurement) / dt;
-	m_derivative = (m_derivativeTau * m_derivative + dt * rawDeriv)
-		/ (m_derivativeTau + dt);
+	// 3) 미분 항 계산 및 1차 필터 (Tustin / Bilinear Transform 적용)
+	// 공식: Y[n] = ( 2*(U[n]-U[n-1]) + (2*tau - dt)*Y[n-1] ) / (2*tau + dt)
+	// 여기서 (U[n]-U[n-1])은 오차의 변화량이므로, (m_prevMeasurement - measurement)와 동일
+	const double two_tau = 2.0 * m_derivativeTau;
+	const double input_diff = m_prevMeasurement - measurement;	// 오차의 변화량
+
+	// Tustin 적용 점화식
+	m_derivative = (2.0 * input_diff + (two_tau - dt) * m_derivative)
+					/ (two_tau + dt);
 	const double d_term = m_kd * m_derivative;
 
 	// 4) 적분 항을 제외한 P + D 합산
