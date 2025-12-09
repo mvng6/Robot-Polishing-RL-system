@@ -27,7 +27,7 @@ unsigned short calculate_crc16(const unsigned char* data, size_t length)
 
 // Packing 함수
 std::vector<char> PackRobotStatus(float current_forceZ, float target_forceZ, float error_forceZ, float error_forceZ_dot, float error_forceZ_int,
-	float cur_PID_output, bool Sander_Flag, float precharge_applied, float j3, bool prep_flag)
+	float cur_PID_output, bool Sander_Flag)
 {
 	PythonCommPacket packet;
 	packet.sof = 0xAAAA;									// Start of Frame (2바이트)
@@ -38,9 +38,6 @@ std::vector<char> PackRobotStatus(float current_forceZ, float target_forceZ, flo
 	packet.RL_forceZErrorintegral = error_forceZ_int;		// z방향 접촉력 오차의 적분값 (4바이트)
 	packet.RL_currentPID = cur_PID_output;					// 현재 PID 출력값 (4바이트)
 	packet.RL_sanderactiveFlag = Sander_Flag;				// Sander 활성화 플래그 (1바이트)
-	packet.RL_preccharge_applied = precharge_applied;		// 초기 공압 (4바이트)
-	packet.RL_j3 = j3;										// 로봇 z 위치좌표 (4바이트)
-	packet.RL_prep_flag = prep_flag;						// 샌더 동작 3초전 알림 플래그 (1바이트)
 
 	// 네트워크 바이트 순서 변환 (Host to Network)
 	packet.sof = htons(packet.sof);
@@ -50,8 +47,6 @@ std::vector<char> PackRobotStatus(float current_forceZ, float target_forceZ, flo
 	*(unsigned long*)&packet.RL_forceZErrordot = htonl(*(unsigned long*)&packet.RL_forceZErrordot);
 	*(unsigned long*)&packet.RL_forceZErrorintegral = htonl(*(unsigned long*)&packet.RL_forceZErrorintegral);
 	*(unsigned long*)&packet.RL_currentPID = htonl(*(unsigned long*)&packet.RL_currentPID);
-	*(unsigned long*)&packet.RL_preccharge_applied = htonl(*(unsigned long*)&packet.RL_preccharge_applied);
-	*(unsigned long*)&packet.RL_j3 = htonl(*(unsigned long*)&packet.RL_j3);
 
 	// 체크섬 계산 및 설정
 	packet.checksum = calculate_crc16((const unsigned char*)&packet, sizeof(packet) - sizeof(unsigned short));
@@ -89,10 +84,6 @@ bool UnpackRLAgentCommand(const char* buffer, int length, RLAgentPacket& outPack
 	// 2. 네트워크 바이트 순서 변환 (Network to Host)
 	outPacket.sof = ntohs(received_packet.sof);
 
-	// 초기 공압값의 네트워크 바이트 순서 변환 (Network to Host)
-	float rl_precharge = received_packet.RL_precharge;
-	*(uint32_t*)&rl_precharge = ntohl(*(uint32_t*)&rl_precharge);
-
 	// PID 게인값들의 네트워크 바이트 순서 변환 (Network to Host)
 	float rl_gain_P = received_packet.RL_gain_P;
 	*(uint32_t*)&rl_gain_P = ntohl(*(uint32_t*)&rl_gain_P);
@@ -103,7 +94,6 @@ bool UnpackRLAgentCommand(const char* buffer, int length, RLAgentPacket& outPack
 	float rl_gain_D = received_packet.RL_gain_D;
 	*(uint32_t*)&rl_gain_D = ntohl(*(uint32_t*)&rl_gain_D);
 
-	outPacket.RL_precharge = rl_precharge;
 	outPacket.RL_gain_P = rl_gain_P;
 	outPacket.RL_gain_I = rl_gain_I;
 	outPacket.RL_gain_D = rl_gain_D;
